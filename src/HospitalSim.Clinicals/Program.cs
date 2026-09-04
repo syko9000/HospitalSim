@@ -7,7 +7,7 @@ using HospitalSim.World;
 var listenPort = int.Parse(Environment.GetEnvironmentVariable("CLINICALS_LISTEN_PORT") ?? "6680");
 var statePath = Environment.GetEnvironmentVariable("CLINICALS_STATE_PATH") ?? "state.json";
 var app = Environment.GetEnvironmentVariable("CLINICALS_APP") ?? "CLINICALS";
-var facility = Environment.GetEnvironmentVariable("CLINICALS_FACILITY") ?? "MRMC";
+var facility = Environment.GetEnvironmentVariable("CLINICALS_FACILITY") ?? "WRMC";
 var orderIntervalSeconds = double.Parse(Environment.GetEnvironmentVariable("CLINICALS_ORDER_INTERVAL_SECONDS") ?? "20");
 // Each department is a genuinely separate destination now that Lab/Rad/Path are real services, not
 // one generic sink - Clinicals has to know where each one is, the same way an interface engine's

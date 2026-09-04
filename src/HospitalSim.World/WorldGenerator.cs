@@ -5,9 +5,9 @@ public sealed class WorldGenerator(int seed)
     private readonly Random _rng = new(seed);
 
     public HospitalWorld Generate(
-        string townName = "Millbrook",
+        string townName = "Wrenfield",
         string state = "OH",
-        string hospitalName = "Millbrook Regional Medical Center",
+        string hospitalName = "Wrenfield Regional Medical Center",
         int doctorCount = 18,
         int insuranceCompanyCount = 5,
         int familyCount = 250)
@@ -16,7 +16,7 @@ public sealed class WorldGenerator(int seed)
 
         var hospital = new Hospital
         {
-            Id = "MRMC",
+            Id = "WRMC",
             Name = hospitalName,
             Town = town,
             NursingUnits =

@@ -6,7 +6,7 @@ using HospitalSim.World;
 
 var department = (Environment.GetEnvironmentVariable("ANCILLARY_DEPARTMENT") ?? "LAB").ToUpperInvariant();
 var app = Environment.GetEnvironmentVariable("ANCILLARY_APP") ?? department;
-var facility = Environment.GetEnvironmentVariable("ANCILLARY_FACILITY") ?? "MRMC";
+var facility = Environment.GetEnvironmentVariable("ANCILLARY_FACILITY") ?? "WRMC";
 var clinicalsApp = Environment.GetEnvironmentVariable("ANCILLARY_CLINICALS_APP") ?? "CLINICALS";
 var listenPort = int.Parse(Environment.GetEnvironmentVariable("ANCILLARY_LISTEN_PORT") ?? "6690");
 var statePath = Environment.GetEnvironmentVariable("ANCILLARY_STATE_PATH") ?? "state.json";

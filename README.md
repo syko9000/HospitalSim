@@ -154,7 +154,7 @@ Registration's environment variables (all optional):
 | `HOSPITALSIM_WAIT_MIN_MINUTES` / `HOSPITALSIM_WAIT_MAX_MINUTES` | `5` / `60` | how long an arrival waits before disposition is decided |
 | `HOSPITALSIM_INPATIENT_PROBABILITY` | `0.3` | chance a disposition is decided inpatient rather than outpatient (falls back to outpatient anyway if no bed's free) |
 | `HOSPITALSIM_DISPOSITION_CHECK_SECONDS` | `20` | how often the pending-arrivals queue is checked for anyone whose wait is up |
-| `HOSPITALSIM_SENDING_APP` / `HOSPITALSIM_SENDING_FACILITY` | `REGISTRATION` / `MRMC` | MSH-3/MSH-4, and Registration's own identity on ACKs it sends |
+| `HOSPITALSIM_SENDING_APP` / `HOSPITALSIM_SENDING_FACILITY` | `REGISTRATION` / `WRMC` | MSH-3/MSH-4, and Registration's own identity on ACKs it sends |
 
 The 300s/5-60min defaults are a starting guess for a long-running instance, not a tuned steady state -
 with ~120 beds total and real (not compressed) length-of-stay, tune `HOSPITALSIM_INTERVAL_SECONDS` and
@@ -179,7 +179,7 @@ Clinicals' environment variables (all optional):
 | --- | --- | --- |
 | `CLINICALS_LISTEN_PORT` | `6680` | port Clinicals listens on for ADT, results (ORU^R01), and reflex orders (ORM^O01) |
 | `CLINICALS_STATE_PATH` | `state.json` | where the visit state is persisted/loaded |
-| `CLINICALS_APP` / `CLINICALS_FACILITY` | `CLINICALS` / `MRMC` | MSH-3/MSH-4 on orders, and Clinicals' own identity on ACKs it sends |
+| `CLINICALS_APP` / `CLINICALS_FACILITY` | `CLINICALS` / `WRMC` | MSH-3/MSH-4 on orders, and Clinicals' own identity on ACKs it sends |
 | `CLINICALS_LAB_MLLP_HOST` / `CLINICALS_LAB_MLLP_PORT` | `localhost` / `6662` | Lab's order-intake host/port |
 | `CLINICALS_RAD_MLLP_HOST` / `CLINICALS_RAD_MLLP_PORT` | `localhost` / `6663` | Rad's order-intake host/port |
 | `CLINICALS_PATH_MLLP_HOST` / `CLINICALS_PATH_MLLP_PORT` | `localhost` / `6664` | Path's order-intake host/port |
@@ -206,7 +206,7 @@ Lab/Rad/Path's environment variables (all optional - same variable names for all
 | --- | --- | --- |
 | `ANCILLARY_DEPARTMENT` | `LAB` | `LAB` / `RAD` / `PATH` - identity, MSH-3 default, and catalog turnaround lookups |
 | `ANCILLARY_APP` | (department) | MSH-3 override, and this department's own identity on ACKs it sends |
-| `ANCILLARY_FACILITY` | `MRMC` | MSH-4 |
+| `ANCILLARY_FACILITY` | `WRMC` | MSH-4 |
 | `ANCILLARY_CLINICALS_APP` | `CLINICALS` | who results/reflex orders are addressed to (MSH-5 on the way out, and the department-routing key Clinicals' own inbound ORM-XO handler looks up by MSH-3 on the way back) |
 | `ANCILLARY_LISTEN_PORT` | `6690` | port this department listens on for inbound orders (ORM^O01, `NW` new or `XO` placer-number update) |
 | `ANCILLARY_STATE_PATH` | `state.json` | where in-progress orders (`PendingResultState`) are persisted/loaded |

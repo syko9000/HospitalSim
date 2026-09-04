@@ -12,7 +12,7 @@ var waitMaxMinutes = double.Parse(Environment.GetEnvironmentVariable("HOSPITALSI
 var inpatientProbability = double.Parse(Environment.GetEnvironmentVariable("HOSPITALSIM_INPATIENT_PROBABILITY") ?? "0.3");
 var dispositionCheckSeconds = double.Parse(Environment.GetEnvironmentVariable("HOSPITALSIM_DISPOSITION_CHECK_SECONDS") ?? "20");
 var sendingApp = Environment.GetEnvironmentVariable("HOSPITALSIM_SENDING_APP") ?? "REGISTRATION";
-var sendingFacility = Environment.GetEnvironmentVariable("HOSPITALSIM_SENDING_FACILITY") ?? "MRMC";
+var sendingFacility = Environment.GetEnvironmentVariable("HOSPITALSIM_SENDING_FACILITY") ?? "WRMC";
 var listenPort = int.Parse(Environment.GetEnvironmentVariable("HOSPITALSIM_LISTEN_PORT") ?? "6660");
 var censusPath = Environment.GetEnvironmentVariable("HOSPITALSIM_CENSUS_PATH") ?? "census.json";
 
