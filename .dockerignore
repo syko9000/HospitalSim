@@ -1,0 +1,6 @@
+bin/
+obj/
+world.json
+.git/
+.vs/
+.vscode/
