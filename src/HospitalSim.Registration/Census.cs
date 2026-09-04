@@ -1,10 +1,15 @@
+using HospitalSim.Hl7;
 using HospitalSim.World;
 
 namespace HospitalSim.Registration;
 
+// NursingUnitId/BedId/Room/Bed are "" for an Outpatient admission - registered, but never assigned a
+// bed. Class defaults to Inpatient (enum value 0) so a census.json saved before outpatients existed
+// still deserializes as what it always was.
 public sealed record Admission(
     string PatientId,
     string VisitNumber,
+    PatientClass Class,
     string NursingUnitId,
     string BedId,
     string Room,
@@ -30,7 +35,7 @@ public sealed class Census(Hospital hospital)
         foreach (var admission in snapshot.Admissions)
         {
             census._byPatient[admission.PatientId] = admission;
-            census._occupiedBeds.Add(admission.BedId);
+            if (!string.IsNullOrEmpty(admission.BedId)) census._occupiedBeds.Add(admission.BedId);
         }
         return census;
     }
@@ -69,20 +74,22 @@ public sealed class Census(Hospital hospital)
     public void Admit(Admission admission)
     {
         _byPatient[admission.PatientId] = admission;
-        _occupiedBeds.Add(admission.BedId);
+        if (!string.IsNullOrEmpty(admission.BedId)) _occupiedBeds.Add(admission.BedId);
     }
 
+    // Also how an outpatient's class change to inpatient is applied (the "transfer" is from no bed at
+    // all to their first one) - the prior/new BedId being "" is handled the same as any other bed.
     public void Transfer(string patientId, Admission newAdmission)
     {
         var prior = _byPatient[patientId];
-        _occupiedBeds.Remove(prior.BedId);
+        if (!string.IsNullOrEmpty(prior.BedId)) _occupiedBeds.Remove(prior.BedId);
         _byPatient[patientId] = newAdmission;
-        _occupiedBeds.Add(newAdmission.BedId);
+        if (!string.IsNullOrEmpty(newAdmission.BedId)) _occupiedBeds.Add(newAdmission.BedId);
     }
 
     public void Discharge(string patientId)
     {
-        if (_byPatient.Remove(patientId, out var admission))
+        if (_byPatient.Remove(patientId, out var admission) && !string.IsNullOrEmpty(admission.BedId))
         {
             _occupiedBeds.Remove(admission.BedId);
         }

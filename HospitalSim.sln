@@ -15,6 +15,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "HospitalSim.Sink", "src\Hos
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "HospitalSim.Clinicals", "src\HospitalSim.Clinicals\HospitalSim.Clinicals.csproj", "{82702440-57A6-4E5B-A949-7D3F6D0DFBCF}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "HospitalSim.Ancillary", "src\HospitalSim.Ancillary\HospitalSim.Ancillary.csproj", "{EE681CFD-1355-4136-8992-57F4435FB3D5}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -85,6 +87,18 @@ Global
 		{82702440-57A6-4E5B-A949-7D3F6D0DFBCF}.Release|x64.Build.0 = Release|Any CPU
 		{82702440-57A6-4E5B-A949-7D3F6D0DFBCF}.Release|x86.ActiveCfg = Release|Any CPU
 		{82702440-57A6-4E5B-A949-7D3F6D0DFBCF}.Release|x86.Build.0 = Release|Any CPU
+		{EE681CFD-1355-4136-8992-57F4435FB3D5}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{EE681CFD-1355-4136-8992-57F4435FB3D5}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{EE681CFD-1355-4136-8992-57F4435FB3D5}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{EE681CFD-1355-4136-8992-57F4435FB3D5}.Debug|x64.Build.0 = Debug|Any CPU
+		{EE681CFD-1355-4136-8992-57F4435FB3D5}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{EE681CFD-1355-4136-8992-57F4435FB3D5}.Debug|x86.Build.0 = Debug|Any CPU
+		{EE681CFD-1355-4136-8992-57F4435FB3D5}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{EE681CFD-1355-4136-8992-57F4435FB3D5}.Release|Any CPU.Build.0 = Release|Any CPU
+		{EE681CFD-1355-4136-8992-57F4435FB3D5}.Release|x64.ActiveCfg = Release|Any CPU
+		{EE681CFD-1355-4136-8992-57F4435FB3D5}.Release|x64.Build.0 = Release|Any CPU
+		{EE681CFD-1355-4136-8992-57F4435FB3D5}.Release|x86.ActiveCfg = Release|Any CPU
+		{EE681CFD-1355-4136-8992-57F4435FB3D5}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
@@ -95,5 +109,6 @@ Global
 		{05D3E82A-738D-47B7-95AE-5A05D9BBC276} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
 		{1CBE8A53-79CB-4583-AABE-09020D1A778B} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
 		{82702440-57A6-4E5B-A949-7D3F6D0DFBCF} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
+		{EE681CFD-1355-4136-8992-57F4435FB3D5} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
 	EndGlobalSection
 EndGlobal

@@ -5,6 +5,16 @@ public enum AdtEventType
     A01_Admit,
     A02_Transfer,
     A03_Discharge,
+    A04_Register,
+    A06_ChangeToInpatient,
+    A07_ChangeToOutpatient,
+}
+
+/// <summary>PV1-2. Only the two values this simulator ever actually produces - not the full HL7 table.</summary>
+public enum PatientClass
+{
+    Inpatient,
+    Outpatient,
 }
 
 public sealed record AdtPatient(
@@ -22,20 +32,23 @@ public sealed record AdtPatient(
 
 public sealed record AdtVisit(
     string VisitNumber,
+    PatientClass Class,
     string PriorPointOfCare,
     string PointOfCare,
     string Room,
     string Bed,
-    string AttendingDoctorId,
-    string AttendingDoctorLastName,
-    string AttendingDoctorFirstName,
+    // Pre-composed PV1-7 component string (e.g. "DOC001^Smith^Jane"), not separate id/last/first
+    // fields - a sender that only ever captured this field as opaque text off the wire (Clinicals,
+    // echoing what it heard from registration) has no other way to supply it.
+    string AttendingDoctor,
     DateTime AdmitDateTime);
 
 public sealed record AdtInsurance(string CompanyId, string CompanyName, string PolicyNumber);
 
 /// <summary>
-/// Builds minimal ADT^A01 (admit), ADT^A02 (transfer), and ADT^A03 (discharge) messages with
-/// MSH/EVN/PID/PV1/OBX/IN1 segments.
+/// Builds minimal ADT^A01 (inpatient admit), ADT^A02 (transfer), ADT^A03 (discharge), ADT^A04
+/// (outpatient register), ADT^A06 (outpatient -> inpatient class change), and ADT^A07 (inpatient ->
+/// outpatient class change) messages with MSH/EVN/PID/PV1/OBX/IN1 segments.
 /// </summary>
 public static class AdtMessageBuilder
 {
@@ -43,7 +56,7 @@ public static class AdtMessageBuilder
         AdtEventType eventType,
         AdtPatient patient,
         AdtVisit visit,
-        AdtInsurance insurance,
+        AdtInsurance? insurance,
         string sendingApplication,
         string sendingFacility,
         string receivingApplication,
@@ -57,11 +70,16 @@ public static class AdtMessageBuilder
             AdtEventType.A01_Admit => ("A01", "ADT^A01"),
             AdtEventType.A02_Transfer => ("A02", "ADT^A02"),
             AdtEventType.A03_Discharge => ("A03", "ADT^A03"),
+            AdtEventType.A04_Register => ("A04", "ADT^A04"),
+            AdtEventType.A06_ChangeToInpatient => ("A06", "ADT^A06"),
+            AdtEventType.A07_ChangeToOutpatient => ("A07", "ADT^A07"),
             _ => throw new ArgumentOutOfRangeException(nameof(eventType)),
         };
 
         var ts = eventDateTime.ToString("yyyyMMddHHmmss");
-        var dob = patient.DateOfBirth.ToString("yyyyMMdd");
+        // Blank rather than a misleading epoch date when the sender never captured a DOB (Clinicals,
+        // whose PID is otherwise just id + name).
+        var dob = patient.DateOfBirth == default ? "" : patient.DateOfBirth.ToString("yyyyMMdd");
         var admitTs = visit.AdmitDateTime.ToString("yyyyMMddHHmmss");
 
         var msg = new Hl7Message();
@@ -109,9 +127,9 @@ public static class AdtMessageBuilder
         // discharge date-time) - build via an explicit array so the gaps stay obviously intentional.
         var pv1 = new string[45];
         pv1[0] = "1";
-        pv1[1] = "I";
+        pv1[1] = visit.Class == PatientClass.Inpatient ? "I" : "O";
         pv1[2] = $"{visit.PointOfCare}^{visit.Room}^{visit.Bed}^{sendingFacility}";
-        pv1[6] = $"{visit.AttendingDoctorId}^{visit.AttendingDoctorLastName}^{visit.AttendingDoctorFirstName}";
+        pv1[6] = visit.AttendingDoctor;
         pv1[18] = visit.VisitNumber;
         if (eventType == AdtEventType.A03_Discharge)
         {
@@ -136,15 +154,19 @@ public static class AdtMessageBuilder
         }
 
         // IN1-2 plan ID, IN1-3 company ID, IN1-4 company name, IN1-16 name of insured, IN1-36 policy number.
-        var in1 = new string[36];
-        in1[0] = "1";
-        in1[1] = $"{insurance.CompanyId}^{insurance.CompanyName}";
-        in1[2] = insurance.CompanyId;
-        in1[3] = insurance.CompanyName;
-        in1[15] = $"{patient.LastName}^{patient.FirstName}";
-        in1[35] = insurance.PolicyNumber;
-        for (var i = 0; i < in1.Length; i++) in1[i] ??= "";
-        msg.AddSegment("IN1", in1);
+        // Omitted entirely when the sender doesn't carry insurance at all (Clinicals never learned it).
+        if (insurance is not null)
+        {
+            var in1 = new string[36];
+            in1[0] = "1";
+            in1[1] = $"{insurance.CompanyId}^{insurance.CompanyName}";
+            in1[2] = insurance.CompanyId;
+            in1[3] = insurance.CompanyName;
+            in1[15] = $"{patient.LastName}^{patient.FirstName}";
+            in1[35] = insurance.PolicyNumber;
+            for (var i = 0; i < in1.Length; i++) in1[i] ??= "";
+            msg.AddSegment("IN1", in1);
+        }
 
         return msg.Build();
     }

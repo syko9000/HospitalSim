@@ -8,17 +8,52 @@ var listenPort = int.Parse(Environment.GetEnvironmentVariable("CLINICALS_LISTEN_
 var statePath = Environment.GetEnvironmentVariable("CLINICALS_STATE_PATH") ?? "state.json";
 var app = Environment.GetEnvironmentVariable("CLINICALS_APP") ?? "CLINICALS";
 var facility = Environment.GetEnvironmentVariable("CLINICALS_FACILITY") ?? "MRMC";
-var orderHost = Environment.GetEnvironmentVariable("CLINICALS_ORDER_MLLP_HOST") ?? "localhost";
-var orderPort = int.Parse(Environment.GetEnvironmentVariable("CLINICALS_ORDER_MLLP_PORT") ?? "6662");
 var orderIntervalSeconds = double.Parse(Environment.GetEnvironmentVariable("CLINICALS_ORDER_INTERVAL_SECONDS") ?? "20");
+// Each department is a genuinely separate destination now that Lab/Rad/Path are real services, not
+// one generic sink - Clinicals has to know where each one is, the same way an interface engine's
+// MSH-5-based routing would, since nothing here plays that role locally.
+var labHost = Environment.GetEnvironmentVariable("CLINICALS_LAB_MLLP_HOST") ?? "localhost";
+var labPort = int.Parse(Environment.GetEnvironmentVariable("CLINICALS_LAB_MLLP_PORT") ?? "6662");
+var radHost = Environment.GetEnvironmentVariable("CLINICALS_RAD_MLLP_HOST") ?? "localhost";
+var radPort = int.Parse(Environment.GetEnvironmentVariable("CLINICALS_RAD_MLLP_PORT") ?? "6663");
+var pathHost = Environment.GetEnvironmentVariable("CLINICALS_PATH_MLLP_HOST") ?? "localhost";
+var pathPort = int.Parse(Environment.GetEnvironmentVariable("CLINICALS_PATH_MLLP_PORT") ?? "6664");
+var adtHost = Environment.GetEnvironmentVariable("CLINICALS_ADT_MLLP_HOST") ?? "localhost";
+var adtPort = int.Parse(Environment.GetEnvironmentVariable("CLINICALS_ADT_MLLP_PORT") ?? "6660");
+var adtIntervalSeconds = double.Parse(Environment.GetEnvironmentVariable("CLINICALS_ADT_INTERVAL_SECONDS") ?? "30");
+// Units Clinicals will propose as a transfer target - it has no view of registration's actual bed
+// layout (separate process, separate state file), so this is a plausible guess, not a lookup.
+// Registration is still the one that decides whether the guessed bed is actually free.
+var transferUnits = (Environment.GetEnvironmentVariable("CLINICALS_TRANSFER_UNITS") ?? "ICU,MS3,MS4,PEDS")
+    .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+var outpatientLosMinHours = double.Parse(Environment.GetEnvironmentVariable("CLINICALS_OUTPATIENT_LOS_MIN_HOURS") ?? "1");
+var outpatientLosMaxHours = double.Parse(Environment.GetEnvironmentVariable("CLINICALS_OUTPATIENT_LOS_MAX_HOURS") ?? "6");
+var inpatientLosMinHours = double.Parse(Environment.GetEnvironmentVariable("CLINICALS_INPATIENT_LOS_MIN_HOURS") ?? "24");
+var inpatientLosMaxHours = double.Parse(Environment.GetEnvironmentVariable("CLINICALS_INPATIENT_LOS_MAX_HOURS") ?? "72");
+var transferChancePerCheck = double.Parse(Environment.GetEnvironmentVariable("CLINICALS_TRANSFER_CHANCE_PER_CHECK") ?? "0.08");
+var edTransferWeight = int.Parse(Environment.GetEnvironmentVariable("CLINICALS_ED_TRANSFER_WEIGHT") ?? "3");
+var escalationChancePerCheck = double.Parse(Environment.GetEnvironmentVariable("CLINICALS_A06_CHANCE_PER_CHECK") ?? "0.03");
+var demotionChancePerCheck = double.Parse(Environment.GetEnvironmentVariable("CLINICALS_A07_CHANCE_PER_CHECK") ?? "0.05");
+var outpatientOrderWeight = int.Parse(Environment.GetEnvironmentVariable("CLINICALS_OUTPATIENT_ORDER_WEIGHT") ?? "3");
+var procedureChance = double.Parse(Environment.GetEnvironmentVariable("CLINICALS_PROCEDURE_CHANCE") ?? "0.25");
 
 var state = VisitStateStore.LoadOrCreate(statePath);
 Console.WriteLine($"Loaded visit state: {state.Count} people currently known to be in.");
-Console.WriteLine($"Listening for ADT on :{listenPort}.");
-Console.WriteLine($"Sending orders to {orderHost}:{orderPort} every ~{orderIntervalSeconds}s. Ctrl+C to stop.");
+Console.WriteLine($"Listening for ADT/results/reflex orders on :{listenPort}.");
+Console.WriteLine($"Sending orders every ~{orderIntervalSeconds}s - LAB {labHost}:{labPort}, RAD {radHost}:{radPort}, PATH {pathHost}:{pathPort}.");
+Console.WriteLine($"Checking visit lifecycles (discharge/transfer/class-change) against {adtHost}:{adtPort} every ~{adtIntervalSeconds}s. Ctrl+C to stop.");
 
 var rng = new Random();
-using var orderMllp = new MllpClient(orderHost, orderPort);
+using var labMllp = new MllpClient(labHost, labPort);
+using var radMllp = new MllpClient(radHost, radPort);
+using var pathMllp = new MllpClient(pathHost, pathPort);
+var orderClients = new Dictionary<string, MllpClient>(StringComparer.OrdinalIgnoreCase)
+{
+    ["LAB"] = labMllp,
+    ["RAD"] = radMllp,
+    ["PATH"] = pathMllp,
+};
+using var adtMllp = new MllpClient(adtHost, adtPort);
 var orderSeq = 1;
 var controlIdSeq = 1;
 
@@ -32,6 +67,7 @@ using var sigterm = PosixSignalRegistration.Create(PosixSignal.SIGTERM, ctx =>
 
 var listener = new MllpListener(listenPort);
 var listenerTask = listener.RunAsync(HandleMessageAsync, cts.Token);
+var lifecycleLoopTask = LifecycleLoopAsync();
 
 while (!cts.IsCancellationRequested)
 {
@@ -55,32 +91,192 @@ while (!cts.IsCancellationRequested)
 }
 
 await listenerTask;
+await lifecycleLoopTask;
+
+async Task LifecycleLoopAsync()
+{
+    while (!cts.IsCancellationRequested)
+    {
+        try
+        {
+            await DischargeDueVisitsAsync();
+            await MaybeTransferAsync();
+            await MaybeEscalateAsync();
+            await MaybeDemoteAsync();
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            Console.Error.WriteLine($"Lifecycle check failed: {ex.Message}");
+        }
+
+        try
+        {
+            await Task.Delay(TimeSpan.FromSeconds(adtIntervalSeconds * (0.5 + rng.NextDouble())), cts.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            break;
+        }
+    }
+}
+
+// A visit's length of stay is sampled once, at admit/register time (see RecordAdmit/RecordRegister/
+// RecordClassChange) - discharge fires when that clock runs out, not on a per-tick coin flip. That's
+// the whole point: a patient shouldn't be able to get discharged four seconds after being admitted.
+async Task DischargeDueVisitsAsync()
+{
+    var now = DateTime.UtcNow;
+    var due = state.Snapshot().Where(v => now >= v.PlannedDischargeAt).ToList();
+    foreach (var visit in due)
+    {
+        var message = AdtMessageBuilder.Build(
+            AdtEventType.A03_Discharge,
+            ToAdtPatient(visit),
+            // Clinicals never tracked the current bed precisely enough to echo it back - the PV1-3
+            // fields it never learned just go out blank rather than guessed.
+            new AdtVisit(visit.VisitNumber, visit.Class, "", "", "", "", visit.OrderingProvider ?? "", visit.AdmitDateTime),
+            insurance: null,
+            app, facility, "REGISTRATION", facility,
+            NextControlId(), now);
+
+        var ack = await adtMllp.SendAsync(message, cts.Token);
+        Console.WriteLine($"[DISCHARGE] {visit.PatientFirstName} {visit.PatientLastName} (visit {visit.VisitNumber}) | ack: {SummarizeAck(ack)}");
+    }
+}
+
+// Only inpatients have a bed to move - an outpatient visit has nothing here to transfer. Someone
+// currently boarding in the ED is far more likely to actually need a move (to their real inpatient
+// unit) than someone already settled on a floor, so the pick is weighted, not uniform.
+async Task MaybeTransferAsync()
+{
+    var inpatients = state.Snapshot().Where(v => v.Class == PatientClass.Inpatient).ToList();
+    if (inpatients.Count == 0 || rng.NextDouble() >= transferChancePerCheck) return;
+
+    var visit = PickWeighted(inpatients, v => v.CurrentUnit == "ED" ? edTransferWeight : 1);
+    var unit = transferUnits[rng.Next(transferUnits.Length)];
+    var room = rng.Next(1, 21).ToString("000");
+    var bed = ((char)('A' + rng.Next(2))).ToString();
+
+    var message = AdtMessageBuilder.Build(
+        AdtEventType.A02_Transfer,
+        ToAdtPatient(visit),
+        new AdtVisit(visit.VisitNumber, visit.Class, "", unit, room, bed, visit.OrderingProvider ?? "", visit.AdmitDateTime),
+        insurance: null,
+        app, facility, "REGISTRATION", facility,
+        NextControlId(), DateTime.UtcNow);
+
+    var ack = await adtMllp.SendAsync(message, cts.Token);
+    Console.WriteLine($"[TRANSFER]  {visit.PatientFirstName} {visit.PatientLastName} (visit {visit.VisitNumber}, currently {visit.CurrentUnit}) -> proposing {unit} | ack: {SummarizeAck(ack)}");
+}
+
+// A small chance any given outpatient visit turns out to need admission after all, rather than always
+// either discharging clean or having been decided inpatient from the start.
+async Task MaybeEscalateAsync()
+{
+    var outpatients = state.Snapshot().Where(v => v.Class == PatientClass.Outpatient).ToList();
+    if (outpatients.Count == 0 || rng.NextDouble() >= escalationChancePerCheck) return;
+
+    var visit = outpatients[rng.Next(outpatients.Count)];
+    var message = AdtMessageBuilder.Build(
+        AdtEventType.A06_ChangeToInpatient,
+        ToAdtPatient(visit),
+        // No proposed bed here, unlike a transfer - registration decides placement for a fresh
+        // admission-in-place the same way it does for any other admit.
+        new AdtVisit(visit.VisitNumber, PatientClass.Inpatient, "", "", "", "", visit.OrderingProvider ?? "", visit.AdmitDateTime),
+        insurance: null,
+        app, facility, "REGISTRATION", facility,
+        NextControlId(), DateTime.UtcNow);
+
+    var ack = await adtMllp.SendAsync(message, cts.Token);
+    Console.WriteLine($"[ESCALATE]  {visit.PatientFirstName} {visit.PatientLastName} (visit {visit.VisitNumber}) outpatient -> inpatient | ack: {SummarizeAck(ack)}");
+}
+
+// The mirror of MaybeEscalateAsync: an inpatient who no longer needs the bed gets stepped back down
+// to outpatient rather than only ever leaving via a full discharge. Frees the bed on registration's
+// side same as a discharge would, but the visit stays open.
+async Task MaybeDemoteAsync()
+{
+    var inpatients = state.Snapshot().Where(v => v.Class == PatientClass.Inpatient).ToList();
+    if (inpatients.Count == 0 || rng.NextDouble() >= demotionChancePerCheck) return;
+
+    var visit = inpatients[rng.Next(inpatients.Count)];
+    var message = AdtMessageBuilder.Build(
+        AdtEventType.A07_ChangeToOutpatient,
+        ToAdtPatient(visit),
+        new AdtVisit(visit.VisitNumber, PatientClass.Outpatient, "", "", "", "", visit.OrderingProvider ?? "", visit.AdmitDateTime),
+        insurance: null,
+        app, facility, "REGISTRATION", facility,
+        NextControlId(), DateTime.UtcNow);
+
+    var ack = await adtMllp.SendAsync(message, cts.Token);
+    Console.WriteLine($"[DEMOTE]    {visit.PatientFirstName} {visit.PatientLastName} (visit {visit.VisitNumber}) inpatient -> outpatient | ack: {SummarizeAck(ack)}");
+}
+
+T PickWeighted<T>(List<T> items, Func<T, int> weight)
+{
+    var weighted = new List<T>();
+    foreach (var item in items)
+    {
+        for (var i = 0; i < Math.Max(1, weight(item)); i++) weighted.Add(item);
+    }
+    return weighted[rng.Next(weighted.Count)];
+}
+
+TimeSpan SampleLengthOfStay(PatientClass patientClass) => patientClass == PatientClass.Inpatient
+    ? TimeSpan.FromHours(inpatientLosMinHours + rng.NextDouble() * (inpatientLosMaxHours - inpatientLosMinHours))
+    : TimeSpan.FromHours(outpatientLosMinHours + rng.NextDouble() * (outpatientLosMaxHours - outpatientLosMinHours));
+
+// Clinicals only ever captured id + name off the wire - everything else PID would normally carry
+// (DOB, sex, address, SSN...) it never learned, so those go out blank/unknown rather than invented.
+AdtPatient ToAdtPatient(Visit visit) => new(
+    visit.PatientId, visit.PatientFirstName, visit.PatientLastName,
+    'U', default, "", "", "", "", "", "");
 
 async Task PlaceRandomOrderAsync()
 {
-    // Only ever order for someone Clinicals currently believes is admitted - never invent an order
-    // for a visit it doesn't know about.
-    var visit = state.RandomVisit(rng);
-    if (visit is null) return;
+    // Only ever order for someone Clinicals currently believes is in - never invent an order for a
+    // visit it doesn't know about. Outpatient visits get weighted heavier than inpatient: a short,
+    // test-heavy workup vs. sparse routine labs on the floor.
+    var visits = state.Snapshot();
+    if (visits.Count == 0) return;
+    var visit = PickWeighted(visits, v => v.Class == PatientClass.Outpatient ? outpatientOrderWeight : 1);
 
-    var test = ClinicalCatalog.OrderableTests[rng.Next(ClinicalCatalog.OrderableTests.Length)];
+    // A procedure (colonoscopy, cath, ...) is performed by Clinicals itself, not ordered out to a
+    // separate department the way a lab/rad/path test is - nothing leaves Clinicals for this. Only
+    // the result would, once that's modeled (see the README's ORU note - not built yet), so there's
+    // no HL7 message to send here at all, just the fact that it happened.
+    if (visit.Class == PatientClass.Outpatient && rng.NextDouble() < procedureChance)
+    {
+        var procedure = ClinicalCatalog.Procedures[rng.Next(ClinicalCatalog.Procedures.Length)];
+        Console.WriteLine($"[PROCEDURE] {procedure.Department} {procedure.Code} ({procedure.Name}) for {visit.PatientFirstName} {visit.PatientLastName} (visit {visit.VisitNumber}) - performed in-house, no outbound order");
+        return;
+    }
+
+    var test = visit.Class == PatientClass.Inpatient
+        ? ClinicalCatalog.RoutineTests[rng.Next(ClinicalCatalog.RoutineTests.Length)]
+        : ClinicalCatalog.OrderableTests[rng.Next(ClinicalCatalog.OrderableTests.Length)];
+
+    if (!orderClients.TryGetValue(test.Department, out var client))
+    {
+        Console.WriteLine($"[IGNORE]    No route configured for department '{test.Department}' - order not sent");
+        return;
+    }
+
     var now = DateTime.UtcNow;
-    var orderNumber = $"ORD{now:yyyyMMddHHmmss}{orderSeq++:0000}";
+    var placerOrderNumber = NextOrderNumber();
 
     var message = OrmMessageBuilder.Build(
-        new OrmPatient(visit.PatientId, visit.PatientName, visit.VisitNumber),
-        new OrmOrder(orderNumber, test.Code, test.Name, visit.OrderingProvider, now),
+        new OrmPatient(visit.PatientId, visit.PatientFirstName, visit.PatientLastName, visit.VisitNumber),
+        new OrmOrder(placerOrderNumber, null, test.Code, test.Name, visit.OrderingProvider, now),
         test.Department,
         app, facility,
         NextControlId(), now);
 
-    var ack = await orderMllp.SendAsync(message, cts.Token);
-    Console.WriteLine($"[ORDER]     {test.Department} {test.Code} ({test.Name}) for {visit.PatientName} (visit {visit.VisitNumber}) | ack: {SummarizeAck(ack)}");
+    var ack = await client.SendAsync(message, cts.Token);
+    Console.WriteLine($"[ORDER]     {test.Department} {test.Code} ({test.Name}) for {visit.PatientFirstName} {visit.PatientLastName} (visit {visit.VisitNumber}), placer {placerOrderNumber} | ack: {SummarizeAck(ack)}");
 }
 
-Task<string> HandleMessageAsync(string rawMessage) => Task.FromResult(HandleMessage(rawMessage));
-
-string HandleMessage(string rawMessage)
+async Task<string> HandleMessageAsync(string rawMessage)
 {
     var now = DateTime.UtcNow;
     Hl7ParsedMessage parsed;
@@ -106,8 +302,26 @@ string HandleMessage(string rawMessage)
         case "ADT^A01":
             RecordAdmit(parsed);
             break;
+        case "ADT^A04":
+            RecordRegister(parsed);
+            break;
+        case "ADT^A02":
+            RecordTransfer(parsed);
+            break;
         case "ADT^A03":
             RecordDischarge(parsed);
+            break;
+        case "ADT^A06":
+            RecordClassChangeToInpatient(parsed);
+            break;
+        case "ADT^A07":
+            RecordClassChangeToOutpatient(parsed);
+            break;
+        case "ORU^R01":
+            RecordResult(parsed);
+            break;
+        case "ORM^O01":
+            await RecordReflexOrderAsync(parsed, sendingApp);
             break;
         default:
             Console.WriteLine($"[IGNORE]    {parsed.MessageType} from {sendingApp}/{sendingFacility} - not handled yet");
@@ -124,6 +338,7 @@ void RecordAdmit(Hl7ParsedMessage parsed)
     var lastName = parsed.Component("PID", 5, 1);
     var firstName = parsed.Component("PID", 5, 2);
     var orderingProvider = parsed.Field("PV1", 7);
+    var unit = parsed.Component("PV1", 3, 1) ?? "";
 
     if (string.IsNullOrEmpty(visitNumber) || string.IsNullOrEmpty(patientId))
     {
@@ -131,9 +346,75 @@ void RecordAdmit(Hl7ParsedMessage parsed)
         return;
     }
 
-    state.RecordIn(new Visit(visitNumber, patientId, $"{firstName} {lastName}".Trim(), orderingProvider, DateTime.UtcNow));
+    var now = DateTime.UtcNow;
+    state.RecordIn(new Visit(visitNumber, patientId, firstName ?? "", lastName ?? "", orderingProvider, PatientClass.Inpatient, unit, now, now + SampleLengthOfStay(PatientClass.Inpatient)));
     VisitStateStore.Save(state, statePath);
-    Console.WriteLine($"[IN]        {firstName} {lastName} (visit {visitNumber})");
+    Console.WriteLine($"[IN]        {firstName} {lastName} (visit {visitNumber}), {unit}");
+}
+
+void RecordRegister(Hl7ParsedMessage parsed)
+{
+    var visitNumber = parsed.Field("PV1", 19);
+    var patientId = parsed.Component("PID", 3, 1);
+    var lastName = parsed.Component("PID", 5, 1);
+    var firstName = parsed.Component("PID", 5, 2);
+    var orderingProvider = parsed.Field("PV1", 7);
+
+    if (string.IsNullOrEmpty(visitNumber) || string.IsNullOrEmpty(patientId))
+    {
+        Console.WriteLine("[IGNORE]    A04 missing PV1-19 visit number or PID-3 patient ID");
+        return;
+    }
+
+    var now = DateTime.UtcNow;
+    state.RecordIn(new Visit(visitNumber, patientId, firstName ?? "", lastName ?? "", orderingProvider, PatientClass.Outpatient, "", now, now + SampleLengthOfStay(PatientClass.Outpatient)));
+    VisitStateStore.Save(state, statePath);
+    Console.WriteLine($"[REGISTER]  {firstName} {lastName} (visit {visitNumber})");
+}
+
+void RecordTransfer(Hl7ParsedMessage parsed)
+{
+    var visitNumber = parsed.Field("PV1", 19);
+    var unit = parsed.Component("PV1", 3, 1);
+    if (string.IsNullOrEmpty(visitNumber) || unit is null) return;
+
+    var visit = state.Get(visitNumber);
+    if (visit is null) return; // not tracked - same "not our call to flag" stance as everything else here
+
+    state.RecordIn(visit with { CurrentUnit = unit });
+    VisitStateStore.Save(state, statePath);
+    Console.WriteLine($"[MOVE]      visit {visitNumber} -> {unit}");
+}
+
+void RecordClassChangeToInpatient(Hl7ParsedMessage parsed)
+{
+    var visitNumber = parsed.Field("PV1", 19);
+    if (string.IsNullOrEmpty(visitNumber)) return;
+
+    var visit = state.Get(visitNumber);
+    if (visit is null) return;
+
+    var unit = parsed.Component("PV1", 3, 1) ?? "";
+    var now = DateTime.UtcNow;
+    state.RecordIn(visit with { Class = PatientClass.Inpatient, CurrentUnit = unit, PlannedDischargeAt = now + SampleLengthOfStay(PatientClass.Inpatient) });
+    VisitStateStore.Save(state, statePath);
+    Console.WriteLine($"[PROMOTE]   visit {visitNumber} outpatient -> inpatient, {unit}");
+}
+
+void RecordClassChangeToOutpatient(Hl7ParsedMessage parsed)
+{
+    var visitNumber = parsed.Field("PV1", 19);
+    if (string.IsNullOrEmpty(visitNumber)) return;
+
+    var visit = state.Get(visitNumber);
+    if (visit is null) return;
+
+    // Fresh outpatient timeline from this point - same idea as the fresh inpatient one a promotion
+    // gets, just the other direction. The freed bed itself isn't Clinicals' state to track.
+    var now = DateTime.UtcNow;
+    state.RecordIn(visit with { Class = PatientClass.Outpatient, CurrentUnit = "", PlannedDischargeAt = now + SampleLengthOfStay(PatientClass.Outpatient) });
+    VisitStateStore.Save(state, statePath);
+    Console.WriteLine($"[DEMOTE]    visit {visitNumber} inpatient -> outpatient");
 }
 
 void RecordDischarge(Hl7ParsedMessage parsed)
@@ -154,6 +435,66 @@ void RecordDischarge(Hl7ParsedMessage parsed)
     VisitStateStore.Save(state, statePath);
     Console.WriteLine($"[OUT]       visit {visitNumber}");
 }
+
+void RecordResult(Hl7ParsedMessage parsed)
+{
+    var visitNumber = parsed.Field("PV1", 19);
+    var testCode = parsed.Component("OBR", 4, 1);
+    var testName = parsed.Component("OBR", 4, 2);
+    var value = parsed.Field("OBX", 5);
+    var flag = parsed.Field("OBX", 8);
+    var flagSuffix = string.IsNullOrEmpty(flag) ? "" : $" [{flag}]";
+    Console.WriteLine($"[RESULT]    {testCode} ({testName}) = {value}{flagSuffix} for visit {visitNumber}");
+}
+
+// A department originated this order on its own (a reflex, e.g. an abnormal TSH reflexing to a Free
+// T4) - it can supply its own filler number but not a placer number, since it isn't the placer.
+// Clinicals is, so it assigns one here and replies with an update (ORC-1 XO) carrying both numbers,
+// rather than just ACKing and leaving the department's own order un-numbered on Clinicals' side.
+async Task RecordReflexOrderAsync(Hl7ParsedMessage parsed, string sendingApp)
+{
+    var orderControl = parsed.Field("ORC", 1);
+    if (orderControl != "NW")
+    {
+        Console.WriteLine($"[IGNORE]    ORM with ORC-1 '{orderControl}' from {sendingApp} - not handled");
+        return;
+    }
+
+    var patientId = parsed.Component("PID", 3, 1);
+    var lastName = parsed.Component("PID", 5, 1) ?? "";
+    var firstName = parsed.Component("PID", 5, 2) ?? "";
+    var visitNumber = parsed.Field("PV1", 19) is { Length: > 0 } pv1Visit ? pv1Visit : parsed.Field("PID", 18) ?? "";
+    var fillerOrderNumber = parsed.Field("ORC", 3);
+    var testCode = parsed.Component("OBR", 4, 1);
+    var testName = parsed.Component("OBR", 4, 2) ?? testCode ?? "";
+    var orderingProvider = parsed.Field("ORC", 12);
+
+    if (string.IsNullOrEmpty(patientId) || string.IsNullOrEmpty(fillerOrderNumber) || string.IsNullOrEmpty(testCode))
+    {
+        Console.WriteLine($"[IGNORE]    Reflex order from {sendingApp} missing PID-3, ORC-3, or OBR-4");
+        return;
+    }
+
+    if (!orderClients.TryGetValue(sendingApp, out var client))
+    {
+        Console.WriteLine($"[IGNORE]    Reflex order from unrecognized department '{sendingApp}' - no route to reply on");
+        return;
+    }
+
+    var placerOrderNumber = NextOrderNumber();
+    var now = DateTime.UtcNow;
+
+    var message = OrmMessageBuilder.Build(
+        new OrmPatient(patientId, firstName, lastName, visitNumber),
+        new OrmOrder(placerOrderNumber, fillerOrderNumber, testCode, testName, orderingProvider, now, "XO"),
+        sendingApp, app, facility,
+        NextControlId(), now);
+
+    var ack = await client.SendAsync(message, cts.Token);
+    Console.WriteLine($"[REFLEX]    Assigned placer {placerOrderNumber} for {testCode} ({testName}) filler {fillerOrderNumber} from {sendingApp} | ack: {SummarizeAck(ack)}");
+}
+
+string NextOrderNumber() => $"ORD{DateTime.UtcNow:yyyyMMddHHmmss}{orderSeq++:0000}";
 
 string NextControlId() => $"CL{DateTime.UtcNow:yyyyMMddHHmmss}{controlIdSeq++:0000}";
 

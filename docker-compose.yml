@@ -10,7 +10,7 @@ services:
       # if sink is also compose-managed here, or "sink" if both are on the same compose network).
       HOSPITALSIM_MLLP_HOST: host.docker.internal
       HOSPITALSIM_MLLP_PORT: "6661"
-      HOSPITALSIM_INTERVAL_SECONDS: "5"
+      HOSPITALSIM_INTERVAL_SECONDS: "300"
     extra_hosts:
       # host.docker.internal resolves automatically on Docker Desktop (Mac/Windows) but not on plain
       # Linux Docker Engine - this makes it resolve there too (Docker 20.10+).
@@ -34,18 +34,72 @@ services:
       context: .
       dockerfile: src/HospitalSim.Clinicals/Dockerfile
     environment:
-      # Where orders go - see the note on registration's HOSPITALSIM_MLLP_HOST above, same idea.
-      CLINICALS_ORDER_MLLP_HOST: host.docker.internal
-      CLINICALS_ORDER_MLLP_PORT: "6662"
       CLINICALS_ORDER_INTERVAL_SECONDS: "20"
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+      # Lab/Rad/Path are real services on this same compose network now, not a generic external
+      # receiver - each order goes to the specific department it's for, same idea as an interface
+      # engine's MSH-5 routing, just done here since nothing else plays that role locally.
+      CLINICALS_LAB_MLLP_HOST: lab
+      CLINICALS_LAB_MLLP_PORT: "6690"
+      CLINICALS_RAD_MLLP_HOST: rad
+      CLINICALS_RAD_MLLP_PORT: "6690"
+      CLINICALS_PATH_MLLP_HOST: path
+      CLINICALS_PATH_MLLP_PORT: "6690"
+      # Registration's inbound listener - reachable directly by service name, both being on the same
+      # compose network, unlike the receiver/order targets above which live outside it.
+      CLINICALS_ADT_MLLP_HOST: registration
+      CLINICALS_ADT_MLLP_PORT: "6660"
+      CLINICALS_ADT_INTERVAL_SECONDS: "30"
     ports:
       - "6680:6680"
     volumes:
       - clinicals-data:/data
     restart: unless-stopped
 
+  lab:
+    build:
+      context: .
+      dockerfile: src/HospitalSim.Ancillary/Dockerfile
+    environment:
+      ANCILLARY_DEPARTMENT: LAB
+      ANCILLARY_RESULT_MLLP_HOST: clinicals
+      ANCILLARY_RESULT_MLLP_PORT: "6680"
+    ports:
+      - "6690:6690"
+    volumes:
+      - lab-data:/data
+    restart: unless-stopped
+
+  rad:
+    build:
+      context: .
+      dockerfile: src/HospitalSim.Ancillary/Dockerfile
+    environment:
+      ANCILLARY_DEPARTMENT: RAD
+      ANCILLARY_RESULT_MLLP_HOST: clinicals
+      ANCILLARY_RESULT_MLLP_PORT: "6680"
+    ports:
+      - "6691:6690"
+    volumes:
+      - rad-data:/data
+    restart: unless-stopped
+
+  path:
+    build:
+      context: .
+      dockerfile: src/HospitalSim.Ancillary/Dockerfile
+    environment:
+      ANCILLARY_DEPARTMENT: PATH
+      ANCILLARY_RESULT_MLLP_HOST: clinicals
+      ANCILLARY_RESULT_MLLP_PORT: "6680"
+    ports:
+      - "6692:6690"
+    volumes:
+      - path-data:/data
+    restart: unless-stopped
+
 volumes:
   hospital-sim-data:
   clinicals-data:
+  lab-data:
+  rad-data:
+  path-data:

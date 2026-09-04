@@ -1,11 +1,19 @@
+using HospitalSim.Hl7;
+
 namespace HospitalSim.Clinicals;
 
+// CurrentUnit is "" for an Outpatient (or an Inpatient Clinicals hasn't heard a location for yet) -
+// deliberately still a follower here, same as the class doc below says about the rest of this state.
 public sealed record Visit(
     string VisitNumber,
     string PatientId,
-    string PatientName,
+    string PatientFirstName,
+    string PatientLastName,
     string? OrderingProvider,
-    DateTime AdmitDateTime);
+    PatientClass Class,
+    string CurrentUnit,
+    DateTime AdmitDateTime,
+    DateTime PlannedDischargeAt);
 
 /// <summary>
 /// Tracks who Clinicals currently believes is in the hospital, keyed by visit number rather than
@@ -29,20 +37,14 @@ public sealed class VisitState
 
     public bool IsKnown(string visitNumber) => _byVisitNumber.ContainsKey(visitNumber);
 
+    public Visit? Get(string visitNumber) => _byVisitNumber.GetValueOrDefault(visitNumber);
+
     public void RecordIn(Visit visit) => _byVisitNumber[visit.VisitNumber] = visit;
 
     /// <returns><see langword="true"/> if the visit was known and removed; <see langword="false"/> if it was already unknown.</returns>
     public bool RecordOut(string visitNumber) => _byVisitNumber.Remove(visitNumber);
 
     public List<Visit> Snapshot() => [.. _byVisitNumber.Values];
-
-    /// <summary>A random currently-known visit to order against, or <see langword="null"/> if nobody's in.</summary>
-    public Visit? RandomVisit(Random rng)
-    {
-        if (_byVisitNumber.Count == 0) return null;
-        var index = rng.Next(_byVisitNumber.Count);
-        return _byVisitNumber.Values.Skip(index).First();
-    }
 
     public static VisitState Restore(List<Visit> visits)
     {
