@@ -254,7 +254,8 @@ async Task<string> BroadcastAsync(AdtEventType eventType, Admission admission, s
         // the hospital's own facility, since this never leaves it. A point-to-point message (a future
         // clinical order, say) would name a specific receiving application here (LAB, RAD, ...).
         sendingApp, sendingFacility, "", sendingFacility,
-        NextControlId(), now, chiefComplaint);
+        NextControlId(), now, chiefComplaint,
+        ToAdtNextOfKin(patient), ToAdtGuarantor(patient));
 
     return await mllp.SendAsync(message, cts.Token);
 }
@@ -446,6 +447,53 @@ AdtInsurance ToAdtInsurance(Person patient)
 {
     var insurer = world.InsuranceCompanies.First(i => i.Id == patient.InsuranceCompanyId);
     return new AdtInsurance(insurer.Id, insurer.Name, patient.PolicyNumber);
+}
+
+// Spouse first, then a parent, then (mainly for a widowed/single elderly resident whose own parents
+// predate the simulation) a living resident child found by reverse lookup - the same reverse-lookup
+// idea already used to find doctors' PersonId, applied to family instead. Null when none of those
+// exist (an independent adult with no tracked spouse, parent, or child), same as any other
+// never-learned-it field elsewhere in this codebase.
+AdtNextOfKin? ToAdtNextOfKin(Person patient)
+{
+    Person? nextOfKin = null;
+    string relationshipCode = "", relationshipDescription = "";
+
+    if (patient.SpouseId is { } spouseId)
+    {
+        var spouse = world.People.FirstOrDefault(p => p.Id == spouseId && p.DeathDate is null);
+        if (spouse is not null) (nextOfKin, relationshipCode, relationshipDescription) = (spouse, "SPO", "Spouse");
+    }
+    if (nextOfKin is null && patient.ParentIds.Count > 0)
+    {
+        var parent = world.People.FirstOrDefault(p => patient.ParentIds.Contains(p.Id) && p.DeathDate is null);
+        if (parent is not null) (nextOfKin, relationshipCode, relationshipDescription) = (parent, "PAR", "Parent");
+    }
+    if (nextOfKin is null)
+    {
+        var child = world.People.FirstOrDefault(p => p.Resident && p.DeathDate is null && p.ParentIds.Contains(patient.Id));
+        if (child is not null) (nextOfKin, relationshipCode, relationshipDescription) = (child, "CHD", "Child");
+    }
+    if (nextOfKin is null) return null;
+
+    return new AdtNextOfKin(
+        nextOfKin.FirstName, nextOfKin.LastName, relationshipCode, relationshipDescription,
+        nextOfKin.Address.Line1, nextOfKin.Address.City, nextOfKin.Address.State, nextOfKin.Address.ZipCode,
+        nextOfKin.PhoneNumber, nextOfKin.Sex == Sex.Male ? 'M' : 'F', nextOfKin.DateOfBirth);
+}
+
+// Always resolvable - every resident has a guarantor, even if it's themselves (GuarantorId == Id).
+AdtGuarantor ToAdtGuarantor(Person patient)
+{
+    var guarantor = world.People.First(p => p.Id == patient.GuarantorId);
+    var (relationshipCode, relationshipDescription) = guarantor.Id == patient.Id ? ("SEL", "Self")
+        : guarantor.Id == patient.SpouseId ? ("SPO", "Spouse")
+        : ("PAR", "Parent");
+
+    return new AdtGuarantor(
+        guarantor.Id, guarantor.FirstName, guarantor.LastName, relationshipCode, relationshipDescription,
+        guarantor.Address.Line1, guarantor.Address.City, guarantor.Address.State, guarantor.Address.ZipCode,
+        guarantor.PhoneNumber, guarantor.Sex == Sex.Male ? 'M' : 'F', guarantor.DateOfBirth, guarantor.Ssn);
 }
 
 string NextControlId() => $"HS{DateTime.UtcNow:yyyyMMddHHmmss}{controlIdSeq++:0000}";

@@ -45,10 +45,22 @@ public sealed record AdtVisit(
 
 public sealed record AdtInsurance(string CompanyId, string CompanyName, string PolicyNumber);
 
+// RelationshipCode/RelationshipDescription follow HL7 user table 0063 (e.g. "SPO"/"Spouse",
+// "PAR"/"Parent", "CHD"/"Child") - describes this person's relationship *to the patient*.
+public sealed record AdtNextOfKin(
+    string FirstName, string LastName, string RelationshipCode, string RelationshipDescription,
+    string AddressLine1, string City, string State, string ZipCode, string PhoneNumber,
+    char Sex, DateOnly DateOfBirth);
+
+public sealed record AdtGuarantor(
+    string GuarantorId, string FirstName, string LastName, string RelationshipCode, string RelationshipDescription,
+    string AddressLine1, string City, string State, string ZipCode, string PhoneNumber,
+    char Sex, DateOnly DateOfBirth, string Ssn);
+
 /// <summary>
 /// Builds minimal ADT^A01 (inpatient admit), ADT^A02 (transfer), ADT^A03 (discharge), ADT^A04
 /// (outpatient register), ADT^A06 (outpatient -> inpatient class change), and ADT^A07 (inpatient ->
-/// outpatient class change) messages with MSH/EVN/PID/PV1/OBX/IN1 segments.
+/// outpatient class change) messages with MSH/EVN/PID/NK1/PV1/OBX/GT1/IN1 segments.
 /// </summary>
 public static class AdtMessageBuilder
 {
@@ -63,7 +75,9 @@ public static class AdtMessageBuilder
         string receivingFacility,
         string messageControlId,
         DateTime eventDateTime,
-        string? chiefComplaint = null)
+        string? chiefComplaint = null,
+        AdtNextOfKin? nextOfKin = null,
+        AdtGuarantor? guarantor = null)
     {
         var (triggerEvent, messageTypeCode) = eventType switch
         {
@@ -122,6 +136,23 @@ public static class AdtMessageBuilder
             "",
             patient.Ssn);
 
+        // NK1 falls between PID and PV1 in the ADT^A01 message structure - not after PV1/OBX like
+        // GT1/IN1 below. Omitted entirely when the patient has no known next of kin (an independent
+        // adult with no tracked spouse, parent, or child) rather than sending an empty segment.
+        if (nextOfKin is not null)
+        {
+            var nk1 = new string[16];
+            nk1[0] = "1";
+            nk1[1] = $"{Hl7Message.EscapeField(nextOfKin.LastName)}^{Hl7Message.EscapeField(nextOfKin.FirstName)}";
+            nk1[2] = $"{nextOfKin.RelationshipCode}^{nextOfKin.RelationshipDescription}";
+            nk1[3] = $"{Hl7Message.EscapeField(nextOfKin.AddressLine1)}^^{Hl7Message.EscapeField(nextOfKin.City)}^{nextOfKin.State}^{nextOfKin.ZipCode}";
+            nk1[4] = nextOfKin.PhoneNumber;
+            nk1[14] = nextOfKin.Sex.ToString();
+            nk1[15] = nextOfKin.DateOfBirth.ToString("yyyyMMdd");
+            for (var i = 0; i < nk1.Length; i++) nk1[i] ??= "";
+            msg.AddSegment("NK1", nk1);
+        }
+
         // PV1 field positions below are 1-indexed to match the HL7 spec (PV1-2 patient class,
         // PV1-3 assigned location, PV1-7 attending doctor, PV1-19 visit number, PV1-44/45 admit/
         // discharge date-time) - build via an explicit array so the gaps stay obviously intentional.
@@ -157,6 +188,25 @@ public static class AdtMessageBuilder
                 "F");
         }
 
+        // GT1 falls after OBX and before the IN1/insurance group in the ADT^A01 message structure.
+        // Guarantor is nearly always known (every resident has one, even if it's themselves) but stays
+        // optional here the same way insurance does, since Clinicals never tracked it either.
+        if (guarantor is not null)
+        {
+            var gt1 = new string[12];
+            gt1[0] = "1";
+            gt1[1] = guarantor.GuarantorId;
+            gt1[2] = $"{Hl7Message.EscapeField(guarantor.LastName)}^{Hl7Message.EscapeField(guarantor.FirstName)}";
+            gt1[4] = $"{Hl7Message.EscapeField(guarantor.AddressLine1)}^^{Hl7Message.EscapeField(guarantor.City)}^{guarantor.State}^{guarantor.ZipCode}";
+            gt1[5] = guarantor.PhoneNumber;
+            gt1[7] = guarantor.DateOfBirth.ToString("yyyyMMdd");
+            gt1[8] = guarantor.Sex.ToString();
+            gt1[10] = $"{guarantor.RelationshipCode}^{guarantor.RelationshipDescription}";
+            gt1[11] = guarantor.Ssn;
+            for (var i = 0; i < gt1.Length; i++) gt1[i] ??= "";
+            msg.AddSegment("GT1", gt1);
+        }
+
         // IN1-2 plan ID, IN1-3 company ID, IN1-4 company name, IN1-16 name of insured, IN1-36 policy number.
         // Omitted entirely when the sender doesn't carry insurance at all (Clinicals never learned it).
         if (insurance is not null)
@@ -166,7 +216,12 @@ public static class AdtMessageBuilder
             in1[1] = $"{insurance.CompanyId}^{insurance.CompanyName}";
             in1[2] = insurance.CompanyId;
             in1[3] = insurance.CompanyName;
-            in1[15] = $"{patient.LastName}^{patient.FirstName}";
+            // The insured is whoever actually holds the policy - the guarantor, not necessarily the
+            // patient themselves (a dependent child's insurance is in a parent's name). Falls back to
+            // the patient's own name only when no guarantor was supplied at all.
+            in1[15] = guarantor is not null
+                ? $"{Hl7Message.EscapeField(guarantor.LastName)}^{Hl7Message.EscapeField(guarantor.FirstName)}"
+                : $"{patient.LastName}^{patient.FirstName}";
             in1[35] = insurance.PolicyNumber;
             for (var i = 0; i < in1.Length; i++) in1[i] ??= "";
             msg.AddSegment("IN1", in1);

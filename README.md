@@ -68,7 +68,17 @@ concurrently:
   state in registration's own message format - never a copy of the bytes that came in. A *rejected*
   transfer (target bed occupied) gets the same treatment in reverse: registration rebroadcasts the
   patient's actual current location right then, so Clinicals' picture of where they are self-corrects
-  instead of drifting further from the census every time a guess misses.
+  instead of drifting further from the census every time a guess misses;
+- every one of those broadcasts (self-initiated or a rebroadcast) also carries NK1 and GT1, populated
+  from the population simulator's own family data rather than invented per-message. NK1 (next of kin)
+  picks a living spouse first, then a living parent, then falls back to a reverse lookup for a living
+  resident child (the same reverse-lookup idea `Doctor.PersonId` already uses) - omitted entirely when
+  none of those exist, same as any other never-learned-it field. GT1 (guarantor) is essentially always
+  present, since every resident has one (even if it's themselves - `GuarantorId == Id` for whoever
+  actually holds the household's policy); IN1-16 (insured's name) now reflects that guarantor instead of
+  always assuming the patient is their own insured, which was a bug this fixed along the way. Segment
+  placement follows the real ADT^A01 message structure, not guesswork: NK1 sits between PID and PV1,
+  GT1 between OBX and IN1 - not simply appended wherever was convenient.
 
 ### HospitalSim.Sink
 
@@ -283,8 +293,8 @@ board, not here):
   where they currently are, instead of a uniform random pick across the whole catalog.
 - **More order types** — broaden beyond the current lab/rad/path/procedure set.
 - **More ADT event types** — round out the trigger events beyond what's modeled today.
-- **More expressive ADT** — NK1 (next of kin), GT1 (guarantor), ACC (accident info), and similar
-  segments this simulator doesn't send yet.
+- **More expressive ADT** — ACC (accident info) and similar segments this simulator doesn't send yet.
+  (NK1/GT1 are done - see Registration's description above.)
 - **Diagnoses and procedures** — DG1 (ICD-10 diagnoses) and PR1 (procedures actually performed, as
   opposed to just what got ordered) riding an ADT^A08 sent once coding's done, not just a
   chief-complaint string.
