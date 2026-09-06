@@ -24,7 +24,7 @@ public sealed record OrmOrder(
 /// Builds a minimal ORM^O01 (MSH/PID/ORC/OBR) order message - a new order, a reflex order a
 /// department originated on its own, or Clinicals' placer-number update replying to one. Unlike the
 /// ADT broadcast, this is point-to-point - MSH-5 names the specific department (LAB/RAD/PATH), which
-/// ClinicalsXL uses to route it.
+/// a downstream interface engine's translation step would use to route it.
 /// </summary>
 public static class OrmMessageBuilder
 {

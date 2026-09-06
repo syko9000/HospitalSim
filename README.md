@@ -1,7 +1,7 @@
 # HospitalSim
 
-A fake hospital in a fake town, generating realistic HL7v2 ADT traffic over MLLP — a standalone
-generator that can point at any HL7 receiver.
+A fake hospital in a fake town, generating realistic HL7v2 ADT traffic over MLLP — a generator that
+can point at any HL7 receiver.
 
 ## Projects
 
@@ -11,8 +11,7 @@ generator that can point at any HL7 receiver.
 - `HospitalSim.Hl7` — minimal hand-rolled HL7v2 message building (`AdtMessageBuilder`, `AckBuilder`), a
   lenient parser (`Hl7ParsedMessage`) for reading inbound messages back apart, and MLLP over TCP in both
   directions (`MllpClient` for sending, `MllpListener` for receiving). This project only ever emits and
-  parses its own well-formed text, dependency-free fit
-  for a standalone repo.
+  parses its own well-formed text, dependency-free.
 - `HospitalSim.Registration` — the "registration system": on first run, generates and saves a world
   (a hospital with ~250 families / ~750 people, 18 doctors across specialties, 5 insurers, 6 nursing
   units). It then does three things concurrently:
@@ -91,7 +90,7 @@ generator that can point at any HL7 receiver.
     broadcast, an order is point-to-point: each department (Lab/Rad/Path) is its own destination now
     (`CLINICALS_LAB_MLLP_HOST` etc - Clinicals routes per department itself, playing the role an
     interface engine's MSH-5 routing would elsewhere), and MSH-5 still names the department so a
-    `ClinicalsXL`-style translation has something to route on too. PID-3 on an order is bare - just the
+    downstream translation has something to route on too. PID-3 on an order is bare - just the
     MR in PID-3.1, no assigning authority or identifier type - since nothing downstream of an order needs
     more than that;
   - a lifecycle loop drives everything else off each visit's own clock, not a per-tick coin flip: at
@@ -257,7 +256,8 @@ not a coin flip" approach as Clinicals' own length-of-stay.
 - Done: Registration no longer originates transfers, discharges, or class changes itself - all four
   (A02/A03/A06/A07) are clinical decisions, driven by Clinicals' own per-visit lifecycle clock, with
   Registration validating, applying the change to the census, and re-broadcasting the confirmed event
-  outbound in its own format (through `reg_in` → RegistrationXL → the fan-out) rather than only ACKing
+  outbound in its own format (through an interface engine's inbound queue and translation step, then the
+  fan-out) rather than only ACKing
   the sender and updating the local census silently. Registration's self-initiated loop only ever
   originates the arrival -> disposition path (A01/A04) now.
 - Done: inpatient vs. outpatient is real, persisted state (`PatientClass` on both Registration's
