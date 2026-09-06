@@ -6,15 +6,22 @@ can point at any HL7 receiver.
 ## Projects
 
 - `HospitalSim.World` — the world model (town, hospital, nursing units/beds, doctors, insurance
-  companies, families, people) and a deterministic generator (`WorldGenerator`), persisted to
-  `world.json` via `WorldStore`.
+  companies, households, people) and its generator (`WorldGenerator`), persisted to `world.json` via
+  `WorldStore`. The population itself isn't a flat, already-adult snapshot - `PopulationSimulator` plays
+  out a century of it year by year (marriages, births, old-age mortality, people moving in or out of
+  town), so real multi-generational lineage, households, and age structure fall out of that simulated
+  history instead of being assembled directly. See its own doc comment for the mechanics.
 - `HospitalSim.Hl7` — minimal hand-rolled HL7v2 message building (`AdtMessageBuilder`, `AckBuilder`), a
   lenient parser (`Hl7ParsedMessage`) for reading inbound messages back apart, and MLLP over TCP in both
   directions (`MllpClient` for sending, `MllpListener` for receiving). This project only ever emits and
   parses its own well-formed text, dependency-free.
-- `HospitalSim.Registration` — the "registration system": on first run, generates and saves a world
-  (a hospital with ~250 families / ~750 people, 18 doctors across specialties, 5 insurers, 6 nursing
-  units). It then does three things concurrently:
+- `HospitalSim.Registration` — the "registration system": on first run, simulates and saves a world
+  (a town whose ~100-year simulated history nets out to roughly 200 households / 600+ living residents,
+  plus 18 doctors across specialties, 5 insurers, and 7 nursing units). Only living residents who've
+  actually been born are ever arrival-eligible - the saved world also carries the deceased, people who've
+  emigrated out of town, and children already conceived but not yet born, so that everyone still in town
+  has real, non-dangling next-of-kin/guarantor references back through their family history. It then does
+  three things concurrently:
   - an arrival loop, on an interval shaped by hour-of-day and day-of-week (`ArrivalRateMultiplier` -
     quiet overnight, busiest evening, a modest Friday/Saturday bump), rolls a random `ArrivalChannel`
     (`ED` / `ChildrensWard` / `FrontDesk` / `LaborAndDelivery`, relative likelihood set by
