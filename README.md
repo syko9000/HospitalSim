@@ -242,41 +242,29 @@ Every accepted order gets its own sampled turnaround (`ClinicalCatalog.Orderable
 min/max-turnaround-minutes for that specific test - not a per-department flat range), same "real clock,
 not a coin flip" approach as Clinicals' own length-of-stay.
 
-## Later
+## Design notes
 
-- Done: a separate container per source system, each with its own MSH sending application and its own
-  MLLP port — mirroring how a real hospital's interfaces work. No shared state file between any of them:
-  state moves only through HL7 messages, hub-and-spoke through the receiver in between.
-- Deliberately don't make every system's HL7 "correct" by the same standard. Real interface traffic is
-  full of vendor drift — one system might put the patient ID in PID-2 instead of PID-3, or carry
-  Registration-only data in a Z-segment that the clinical system expects migrated into a standard field.
-  Baking a quirk or two like that into the clinical system's outbound format (rather than having every
-  source system agree on one canonical layout) gives a translation step actual work to do, which is the
-  point of feeding this into an interface engine in the first place.
-- Done: Registration no longer originates transfers, discharges, or class changes itself - all four
-  (A02/A03/A06/A07) are clinical decisions, driven by Clinicals' own per-visit lifecycle clock, with
-  Registration validating, applying the change to the census, and re-broadcasting the confirmed event
-  outbound in its own format (through an interface engine's inbound queue and translation step, then the
-  fan-out) rather than only ACKing
-  the sender and updating the local census silently. Registration's self-initiated loop only ever
-  originates the arrival -> disposition path (A01/A04) now.
-- Done: inpatient vs. outpatient is real, persisted state (`PatientClass` on both Registration's
-  `Admission` and Clinicals' `Visit`), not just a per-message flag - a visit can move either direction
-  mid-stay (A06/A07) and Clinicals gives it a fresh timeline from that point each time. Still open: A11
-  (cancel admit) is the remaining class/status event Clinicals doesn't originate, once there's a reason
-  to.
-- Done: Lab/Rad/Path exist (`HospitalSim.Ancillary`), take orders, sample a real per-test turnaround
-  (minutes to days, not a flat guess), and report results (ORU^R01) back to Clinicals - including the
-  reflex pattern (a department originating its own follow-up order, with a proper placer/filler order
-  number handshake). Still open: result *content* is a canned string, not real reference
-  ranges/units/numeric values - fine for "a result landed," not for anything that needs to look at what
-  the result actually says.
-- Still open: none of this pacing is calibrated against actual occupancy - `HOSPITALSIM_INTERVAL_SECONDS`,
-  `HOSPITALSIM_INPATIENT_PROBABILITY`, and Clinicals' LOS ranges are independent knobs that happen to
-  roughly balance out at their defaults, not a feedback loop. `DecideDispositionAsync` already falls back
-  to outpatient when no bed's free rather than blocking, but a truly steady-state-aware arrival rate is
-  future work if the current defaults don't hold up over a long run.
-- Registration and billing are tightly coupled in real hospitals: an ADT^A08 carrying DG1 (diagnosis)
-  segments flows back into Registration (from billing/HIM, once that exists), and Registration echoes
-  out its own ADT^A08 with everything it now knows. Not started - noted for whenever billing becomes a
-  real piece of this.
+Each source system's HL7 isn't "correct" by the same standard on purpose. Real interface traffic is
+full of vendor drift — one system might put the patient ID in PID-2 instead of PID-3, or carry
+Registration-only data in a Z-segment that the clinical system expects migrated into a standard field.
+Baking a quirk or two like that into the clinical system's outbound format (rather than having every
+source system agree on one canonical layout) gives a translation step actual work to do, which is the
+point of feeding this into an interface engine in the first place.
+
+## Roadmap
+
+Known gaps, not yet built:
+
+- **A11 (cancel admit)** — the one admit/class/status event Clinicals doesn't originate. Inpatient vs.
+  outpatient already moves both directions mid-stay (A06/A07) with a fresh timeline each time; A11 would
+  round that out.
+- **Result content** — ORU^R01 results are a canned string (`Within normal limits` / `Abnormal - see
+  report`, ~15% abnormal), not real reference ranges, units, or numeric values. Enough to look like a
+  result landed, not enough for anything that inspects what it actually says.
+- **Occupancy-aware pacing** — arrival rate, inpatient probability, and length-of-stay ranges are
+  independent knobs that happen to roughly balance out at their defaults, not a feedback loop against
+  actual bed occupancy. Registration already falls back to outpatient rather than blocking when no bed's
+  free, but a truly steady-state-aware arrival rate is still future work.
+- **Billing** — Registration and billing are tightly coupled in real hospitals: an ADT^A08 carrying DG1
+  (diagnosis) segments would flow back into Registration from billing/HIM once that exists, with
+  Registration echoing its own A08 back out. Not started.
