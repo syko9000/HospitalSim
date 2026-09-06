@@ -28,7 +28,9 @@ var censusPath = Environment.GetEnvironmentVariable("HOSPITALSIM_CENSUS_PATH") ?
 
 var world = WorldStore.LoadOrGenerate(worldPath);
 Console.WriteLine($"Loaded world: {world.Hospital.Name} in {world.Hospital.Town.Name}, {world.Hospital.Town.State}");
-Console.WriteLine($"  {world.Doctors.Count} doctors, {world.InsuranceCompanies.Count} insurers, {world.Families.Count} families, {world.People.Count} people");
+var today = DateOnly.FromDateTime(DateTime.UtcNow);
+var livingResidents = world.People.Count(p => p.Resident && p.DeathDate is null && p.DateOfBirth <= today);
+Console.WriteLine($"  {world.Doctors.Count} doctors, {world.InsuranceCompanies.Count} insurers, {world.Households.Count} households, {livingResidents} living residents ({world.People.Count} in the full roster, incl. deceased/emigrated/not-yet-born)");
 Console.WriteLine($"Sending MLLP to {host}:{port}. New arrivals every ~{arrivalIntervalSeconds}s baseline (day/night and weekday shaped), each waiting {waitMinMinutes}-{waitMaxMinutes} min to be seen before disposition. Ctrl+C to stop.");
 Console.WriteLine($"Listening for inbound HL7 (e.g. clinical-initiated transfers/discharges/class changes) on :{listenPort}.");
 
@@ -169,7 +171,12 @@ ArrivalChannel PickChannel()
 void EnqueueArrival()
 {
     var channel = PickChannel();
+    var today = DateOnly.FromDateTime(DateTime.UtcNow);
+    // world.People is the full roster - alive residents, the deceased, non-residents who emigrated,
+    // and children already scheduled but not yet born - not just who can actually walk through the
+    // door today.
     var candidates = world.People
+        .Where(p => p.Resident && p.DeathDate is null && p.DateOfBirth <= today)
         .Where(p => !census.IsAdmitted(p.Id) && !pending.Any(a => a.Patient.Id == p.Id) && ChannelEligible(channel, p))
         .ToList();
     if (candidates.Count == 0) return; // nobody eligible for this channel right now - skip, the next roll tries again

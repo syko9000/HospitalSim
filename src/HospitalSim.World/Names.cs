@@ -51,4 +51,26 @@ internal static class Names
     [
         "Health Partners", "Mutual", "Insurance Group", "Health Plan", "Assurance"
     ];
+
+    // Combined with OutOfTownSuffixes below (14 x 12 = 168 combinations) for emigrated residents'
+    // addresses - a synthetic town name pool built the same procedural way as street names, rather
+    // than a hand-authored list of exactly 100, since neither risks colliding with a real place.
+    public static readonly string[] OutOfTownPrefixes =
+    [
+        "Fair", "River", "Amber", "Stone", "Elm", "North", "South", "New", "Green", "Clear",
+        "Silver", "Cross", "Deer", "Ash"
+    ];
+
+    public static readonly string[] OutOfTownSuffixes =
+    [
+        "view", "field", "ton", "ville", "burg", "dale", "wood", "port", "haven", "ridge", "town", "boro"
+    ];
+
+    // 10 states within a plausible drive/relocation radius of Ohio, each with a real zip-code leading
+    // digit so a generated zip at least starts right, without needing a full per-state zip range table.
+    public static readonly (string State, string ZipPrefix)[] OutOfTownStates =
+    [
+        ("OH", "4"), ("PA", "1"), ("IN", "4"), ("KY", "4"), ("WV", "2"),
+        ("MI", "4"), ("IL", "6"), ("TN", "3"), ("NC", "2"), ("VA", "2")
+    ];
 }

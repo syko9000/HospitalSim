@@ -10,7 +10,8 @@ public sealed class WorldGenerator(int seed)
         string hospitalName = "Wrenfield Regional Medical Center",
         int doctorCount = 18,
         int insuranceCompanyCount = 5,
-        int familyCount = 250)
+        int founderHouseholdCount = 90,
+        int simulationYears = 100)
     {
         var town = new Town { Name = townName, State = state, ZipCode = RandomZip() };
 
@@ -33,14 +34,19 @@ public sealed class WorldGenerator(int seed)
 
         var doctors = GenerateDoctors(doctorCount);
         var insurers = GenerateInsuranceCompanies(insuranceCompanyCount);
-        var (families, people) = GenerateFamilies(familyCount, town, insurers);
+
+        // The population isn't generated as a flat, already-adult snapshot - it's simulated year by
+        // year across a century (marriages, births, old-age mortality, people moving in or out of
+        // town) so lineage, households, and age structure all come out of that history rather than
+        // being assembled directly. See PopulationSimulator for the actual mechanics.
+        var (households, people) = new PopulationSimulator(_rng, town, insurers).Simulate(simulationYears, founderHouseholdCount);
 
         return new HospitalWorld
         {
             Hospital = hospital,
             Doctors = doctors,
             InsuranceCompanies = insurers,
-            Families = families,
+            Households = households,
             People = people,
         };
     }
@@ -73,87 +79,9 @@ public sealed class WorldGenerator(int seed)
         }).ToList();
     }
 
-    private (List<Family> families, List<Person> people) GenerateFamilies(
-        int count, Town town, List<InsuranceCompany> insurers)
-    {
-        var families = new List<Family>(count);
-        var people = new List<Person>();
-        var personSeq = 1;
-
-        for (var i = 0; i < count; i++)
-        {
-            var familyId = $"FAM{i + 1:00000}";
-            var surname = Pick(Names.Surnames);
-            var address = RandomAddress(town);
-            var insurer = Pick(insurers);
-            var policyNumber = $"P{_rng.Next(100000000, 999999999)}";
-
-            var family = new Family { Id = familyId, Surname = surname, Address = address };
-
-            var memberCount = _rng.Next(1, 6); // 1-5 members
-            var adultsAdded = 0;
-            for (var m = 0; m < memberCount; m++)
-            {
-                var isAdult = adultsAdded < 2 && (m < 2 || _rng.NextDouble() < 0.3);
-                if (isAdult) adultsAdded++;
-
-                var sex = _rng.NextDouble() < 0.5 ? Sex.Male : Sex.Female;
-                var dob = isAdult ? RandomAdultDob() : RandomChildDob();
-
-                var person = new Person
-                {
-                    Id = $"P{personSeq++:000000}",
-                    FirstName = sex == Sex.Male ? Pick(Names.Male) : Pick(Names.Female),
-                    LastName = surname,
-                    Sex = sex,
-                    DateOfBirth = dob,
-                    Ssn = RandomSsn(),
-                    Address = address,
-                    PhoneNumber = RandomPhone(),
-                    FamilyId = familyId,
-                    InsuranceCompanyId = insurer.Id,
-                    PolicyNumber = policyNumber,
-                };
-
-                people.Add(person);
-                family.MemberIds.Add(person.Id);
-            }
-
-            families.Add(family);
-        }
-
-        return (families, people);
-    }
-
     private string PickFirstName() => _rng.NextDouble() < 0.5 ? Pick(Names.Male) : Pick(Names.Female);
 
     private T Pick<T>(IReadOnlyList<T> items) => items[_rng.Next(items.Count)];
 
-    private Address RandomAddress(Town town) => new()
-    {
-        Line1 = $"{_rng.Next(100, 9999)} {Pick(Names.StreetNames)} {Pick(Names.StreetSuffixes)}",
-        City = town.Name,
-        State = town.State,
-        ZipCode = town.ZipCode,
-    };
-
     private string RandomZip() => _rng.Next(10000, 99999).ToString();
-
-    private string RandomPhone() => $"555{_rng.Next(200, 999)}{_rng.Next(1000, 9999)}";
-
-    private string RandomSsn() => $"{_rng.Next(100, 999)}{_rng.Next(10, 99)}{_rng.Next(1000, 9999)}";
-
-    private DateOnly RandomAdultDob()
-    {
-        var age = _rng.Next(19, 90);
-        var today = DateOnly.FromDateTime(DateTime.UtcNow);
-        return today.AddYears(-age).AddDays(-_rng.Next(0, 365));
-    }
-
-    private DateOnly RandomChildDob()
-    {
-        var age = _rng.Next(0, 18);
-        var today = DateOnly.FromDateTime(DateTime.UtcNow);
-        return today.AddYears(-age).AddDays(-_rng.Next(0, 365));
-    }
 }

@@ -5,125 +5,141 @@ can point at any HL7 receiver.
 
 ## Projects
 
-- `HospitalSim.World` — the world model (town, hospital, nursing units/beds, doctors, insurance
-  companies, households, people) and its generator (`WorldGenerator`), persisted to `world.json` via
-  `WorldStore`. The population itself isn't a flat, already-adult snapshot - `PopulationSimulator` plays
-  out a century of it year by year (marriages, births, old-age mortality, people moving in or out of
-  town), so real multi-generational lineage, households, and age structure fall out of that simulated
-  history instead of being assembled directly. See its own doc comment for the mechanics.
-- `HospitalSim.Hl7` — minimal hand-rolled HL7v2 message building (`AdtMessageBuilder`, `AckBuilder`), a
-  lenient parser (`Hl7ParsedMessage`) for reading inbound messages back apart, and MLLP over TCP in both
-  directions (`MllpClient` for sending, `MllpListener` for receiving). This project only ever emits and
-  parses its own well-formed text, dependency-free.
-- `HospitalSim.Registration` — the "registration system": on first run, simulates and saves a world
-  (a town whose ~100-year simulated history nets out to roughly 200 households / 600+ living residents,
-  plus 18 doctors across specialties, 5 insurers, and 7 nursing units). Only living residents who've
-  actually been born are ever arrival-eligible - the saved world also carries the deceased, people who've
-  emigrated out of town, and children already conceived but not yet born, so that everyone still in town
-  has real, non-dangling next-of-kin/guarantor references back through their family history. It then does
-  three things concurrently:
-  - an arrival loop, on an interval shaped by hour-of-day and day-of-week (`ArrivalRateMultiplier` -
-    quiet overnight, busiest evening, a modest Friday/Saturday bump), rolls a random `ArrivalChannel`
-    (`ED` / `ChildrensWard` / `FrontDesk` / `LaborAndDelivery`, relative likelihood set by
-    `HOSPITALSIM_CHANNEL_WEIGHT_*`) and queues an eligible not-yet-in-system person for it as a
-    `PendingArrival`, with a real wait span before anyone decides what happens to them - not persisted,
-    since a restart mid-wait losing one pending arrival is a fine simplification for a demo tool. The
-    channel is what someone actually is, not flavor text: `ChildrensWard` only takes under-18s and heads
-    straight for PEDS, `LaborAndDelivery` only takes female patients in the configured childbearing age
-    range (`HOSPITALSIM_CHILDBEARING_MIN_AGE`/`_MAX_AGE`) and only heads for L&D - there's no other way
-    into either of those two units - `FrontDesk` (scheduled procedures/surgery) heads for MS3/MS4, and
-    `ED` is `ED`. The wait scales with how full *that channel's own target unit(s)* currently are, never
-    whole-hospital occupancy - an empty ICU doesn't get an ED patient seen faster, and a full one doesn't
-    slow down a scheduled front-desk admission;
-  - a disposition loop checks that queue for anyone whose wait is up and rolls their disposition within
-    the channel's own target unit(s) only (`ChildrensWard`/`LaborAndDelivery` are always inpatient -
-    nobody walks in there just to go home; `ED`/`FrontDesk` still roll the normal
-    `HOSPITALSIM_INPATIENT_PROBABILITY` coin flip, falling back to outpatient if nothing in that
-    channel's unit(s) is free) sends an ADT^A01, everyone else sends an ADT^A04 (registered, no bed -
-    PV1-2 carries `O`, not `I`). Every admit/register carries an OBX with LOINC 8661-1 (Chief Complaint)
-    and a random reason for the visit (`ClinicalCatalog.ChiefComplaints` in `HospitalSim.World`), giving
-    a downstream clinical system something to actually react to. Registration deliberately never
-    originates a transfer, discharge, or class change itself past this point - all three are clinical
-    decisions;
-  - listens on its own MLLP port for inbound ADT^A02 (transfer, inpatient only - an outpatient has no
-    bed to move), ADT^A03 (discharge, either class), and ADT^A06 (outpatient -> inpatient class change -
-    registration picks the actual bed here, unlike a transfer's specific requested target; unlike a
-    fresh arrival's channel-scoped search, this checks the general `EligibleUnit` filter - PEDS<18,
-    L&D=female - across every unit, since an A06 isn't tied to any particular channel), so a clinical
-    system can drive all three the way real hospitals' feeder systems talk back to registration. PID-3.1
-    is only trusted as the patient's MR when PID-3.4 (assigning authority) and PID-3.5 (identifier type
-    code) actually qualify it as one - a
-    bare, unqualified PID-3.1 gets NAK'd, same as an unrecognized message type, a patient in the wrong
-    class for what's being asked, or a target bed that's already occupied. An accepted
-    move/discharge/class-change is bounced back out to the broadcast feed, rebuilt from census/world
-    state in registration's own message format - never a copy of the bytes that came in. A *rejected*
-    transfer (target bed occupied) gets the same treatment in reverse: registration rebroadcasts the
-    patient's actual current location right then, so Clinicals' picture of where they are self-corrects
-    instead of drifting further from the census every time a guess misses.
-- `HospitalSim.Sink` — an MLLP black hole: accepts any number of concurrent connections, ACKs (`AA`)
-  every message regardless of type or content, and stores/routes nothing. Point several of an engine's
-  outbound interfaces (clinical, lab, rad, ...) at it when you need messages to actually flush out of
-  a queue but don't have (or don't want) a real destination system standing behind each one.
-- `HospitalSim.Ancillary` — one program, three services: Lab, Rad, and Path are the same code
-  (`ANCILLARY_DEPARTMENT` picks the identity/catalog subset), run as three separate containers rather
-  than tripled as three separate projects, since their behavior only ever differs by department, not by
-  logic. Accepts an ORM^O01 from Clinicals, samples a turnaround time from that specific test's range in
-  `ClinicalCatalog` (minutes for a STAT lactate, 1-3 days for a culture or surgical pathology - a real
-  clock per order, not a coin flip), and fires an ORU^R01 back when it's up. Also implements the reflex
-  pattern: a small chance (`ClinicalCatalog.ReflexRules` - e.g. an abnormal-looking TSH reflexing to a
-  Free T4) that finishing one result triggers this department to originate a follow-up order on its own,
-  which the ordering clinician never asked for. See the placer/filler handshake below for how that gets
-  a proper order number.
-- `HospitalSim.Clinicals` — the clinical system, and the one that actually owns a visit's lifecycle.
-  Listens for ADT and tracks who's currently in, keyed by visit number (`VisitState`/`VisitStateStore`,
-  persisted the same load-or-create way as Registration's world/census). ADT^A01 records someone in as
-  inpatient, ADT^A04 as outpatient (both keep PV1-7, the attending doctor, as an opaque string -
-  Clinicals never parses it into components, just echoes it back out later), ADT^A02 updates which unit
-  a tracked visit is currently in, ADT^A06 promotes a tracked visit to inpatient, and ADT^A03 records
-  someone out; anything else (a message missing PV1-19, a transfer/class-change for a visit it isn't
-  tracking) is logged and skipped, not NAK'd - Clinicals only ever follows Registration's feed, it isn't
-  a source of truth, so gaps are expected, not errors. It stays in sync on its own as Registration's
-  messages keep arriving; always ACKs `AA` so nothing it doesn't understand yet ever blocks the queue.
-  ADT^A02/A04/A06/A07 tell it who's currently tracked; ORU^R01 and ORM^O01 (see below) are the other two
-  message types it now understands inbound, alongside ADT. It also *originates* traffic of its own, on
-  two independent loops:
-  - an order loop picks a visit (outpatients weighted `CLINICALS_OUTPATIENT_ORDER_WEIGHT`x heavier than
-    inpatients - a short outpatient stay is test-heavy, an inpatient stay gets sparse routine checks
-    only). Inpatient: `ClinicalCatalog.RoutineTests`, sent as an ORM^O01. Outpatient: usually a
-    full-catalog `OrderableTests` pick, also an ORM^O01, but sometimes (`CLINICALS_PROCEDURE_CHANCE`) a
-    `ClinicalCatalog.Procedures` entry instead - and a procedure is performed by Clinicals itself, not
-    ordered out to a separate department the way a lab/rad/path test is, so nothing goes out on the wire
-    for it at all (only the result would, once that's modeled - not built yet). Unlike Registration's ADT
-    broadcast, an order is point-to-point: each department (Lab/Rad/Path) is its own destination now
-    (`CLINICALS_LAB_MLLP_HOST` etc - Clinicals routes per department itself, playing the role an
-    interface engine's MSH-5 routing would elsewhere), and MSH-5 still names the department so a
-    downstream translation has something to route on too. PID-3 on an order is bare - just the
-    MR in PID-3.1, no assigning authority or identifier type - since nothing downstream of an order needs
-    more than that;
-  - a lifecycle loop drives everything else off each visit's own clock, not a per-tick coin flip: at
-    record-in time (A01/A04/A06) a length of stay is sampled once (`CLINICALS_INPATIENT_LOS_*_HOURS` /
-    `CLINICALS_OUTPATIENT_LOS_*_HOURS`) and an ADT^A03 fires when it's up - a patient can't get
-    discharged moments after being admitted. Separately, each tick: only an ED or ICU boarder is a
-    transfer candidate (`CLINICALS_TRANSFER_CHANCE_PER_CHECK`, weighted `CLINICALS_ED_TRANSFER_WEIGHT`x
-    toward ED over ICU) - nobody already on a ward has a further step-down target defined. The target
-    itself follows a real rule (`StepDownTarget`), not a flat random pick: from the ED, ICU or the
-    age-appropriate ward (PEDS if the visit's DOB says under-18, otherwise MS3/MS4); from the ICU,
-    always straight to the age-appropriate ward, never back to the ED. An outpatient may instead get
-    promoted with an ADT^A06 (`CLINICALS_A06_CHANCE_PER_CHECK`) rather than ever discharging - "a small
-    chance of admitting them" - and, the mirror of that, an inpatient may get stepped back down with an
-    ADT^A07 (`CLINICALS_A07_CHANCE_PER_CHECK`), freeing their bed on registration's side without a full
-    discharge. Clinicals has no view of registration's actual bed layout (separate process, separate
-    state file), so a transfer's specific room/bed guess is still one registration is free to reject
-    even when the unit itself is the right call; an A06 proposes no location at all, since bed placement
-    there is registration's call, same as a fresh admit. Every one of these checks the ACK it gets back
-    (MSA-1) rather than assuming success - a NAK'd transfer/discharge/escalation/demotion logs distinctly
-    (`[TRANSFER-REJECTED]` etc.) instead of being written off as if it happened. Treating any ACK as a
-    success is exactly how Clinicals' picture of the world would silently drift from registration's
-    actual census over time. DOB is the one demographic Clinicals actually keeps (parsed from PID-7,
-    which registration's broadcast already carries) - it's what step-down routing above is age-aware
-    from. Everything else Clinicals never captured (sex, address, SSN, insurance) go out blank/unknown
-    rather than
-    invented; IN1 is omitted entirely since Clinicals never tracked insurance at all.
+### HospitalSim.World
+
+The world model (town, hospital, nursing units/beds, doctors, insurance companies, households, people)
+and its generator (`WorldGenerator`), persisted to `world.json` via `WorldStore`. The population itself
+isn't a flat, already-adult snapshot - `PopulationSimulator` plays out a century of it year by year
+(marriages, births, old-age mortality, people moving in or out of town), so real multi-generational
+lineage, households, and age structure fall out of that simulated history instead of being assembled
+directly. See its own doc comment for the mechanics.
+
+### HospitalSim.Hl7
+
+Minimal hand-rolled HL7v2 message building (`AdtMessageBuilder`, `AckBuilder`), a lenient parser
+(`Hl7ParsedMessage`) for reading inbound messages back apart, and MLLP over TCP in both directions
+(`MllpClient` for sending, `MllpListener` for receiving). This project only ever emits and parses its
+own well-formed text, dependency-free.
+
+### HospitalSim.Registration
+
+The "registration system": on first run, simulates and saves a world (a town whose ~100-year simulated
+history nets out to roughly 200 households / 600+ living residents, plus 18 doctors across specialties,
+5 insurers, and 7 nursing units). Only living residents who've actually been born are ever
+arrival-eligible - the saved world also carries the deceased, people who've emigrated out of town, and
+children already conceived but not yet born, so that everyone still in town has real, non-dangling
+next-of-kin/guarantor references back through their family history. It then does three things
+concurrently:
+
+- an arrival loop, on an interval shaped by hour-of-day and day-of-week (`ArrivalRateMultiplier` -
+  quiet overnight, busiest evening, a modest Friday/Saturday bump), rolls a random `ArrivalChannel`
+  (`ED` / `ChildrensWard` / `FrontDesk` / `LaborAndDelivery`, relative likelihood set by
+  `HOSPITALSIM_CHANNEL_WEIGHT_*`) and queues an eligible not-yet-in-system person for it as a
+  `PendingArrival`, with a real wait span before anyone decides what happens to them - not persisted,
+  since a restart mid-wait losing one pending arrival is a fine simplification for a demo tool. The
+  channel is what someone actually is, not flavor text: `ChildrensWard` only takes under-18s and heads
+  straight for PEDS, `LaborAndDelivery` only takes female patients in the configured childbearing age
+  range (`HOSPITALSIM_CHILDBEARING_MIN_AGE`/`_MAX_AGE`) and only heads for L&D - there's no other way
+  into either of those two units - `FrontDesk` (scheduled procedures/surgery) heads for MS3/MS4, and
+  `ED` is `ED`. The wait scales with how full *that channel's own target unit(s)* currently are, never
+  whole-hospital occupancy - an empty ICU doesn't get an ED patient seen faster, and a full one doesn't
+  slow down a scheduled front-desk admission;
+- a disposition loop checks that queue for anyone whose wait is up and rolls their disposition within
+  the channel's own target unit(s) only (`ChildrensWard`/`LaborAndDelivery` are always inpatient -
+  nobody walks in there just to go home; `ED`/`FrontDesk` still roll the normal
+  `HOSPITALSIM_INPATIENT_PROBABILITY` coin flip, falling back to outpatient if nothing in that
+  channel's unit(s) is free) sends an ADT^A01, everyone else sends an ADT^A04 (registered, no bed -
+  PV1-2 carries `O`, not `I`). Every admit/register carries an OBX with LOINC 8661-1 (Chief Complaint)
+  and a random reason for the visit (`ClinicalCatalog.ChiefComplaints` in `HospitalSim.World`), giving
+  a downstream clinical system something to actually react to. Registration deliberately never
+  originates a transfer, discharge, or class change itself past this point - all three are clinical
+  decisions;
+- listens on its own MLLP port for inbound ADT^A02 (transfer, inpatient only - an outpatient has no
+  bed to move), ADT^A03 (discharge, either class), and ADT^A06 (outpatient -> inpatient class change -
+  registration picks the actual bed here, unlike a transfer's specific requested target; unlike a
+  fresh arrival's channel-scoped search, this checks the general `EligibleUnit` filter - PEDS<18,
+  L&D=female - across every unit, since an A06 isn't tied to any particular channel), so a clinical
+  system can drive all three the way real hospitals' feeder systems talk back to registration. PID-3.1
+  is only trusted as the patient's MR when PID-3.4 (assigning authority) and PID-3.5 (identifier type
+  code) actually qualify it as one - a
+  bare, unqualified PID-3.1 gets NAK'd, same as an unrecognized message type, a patient in the wrong
+  class for what's being asked, or a target bed that's already occupied. An accepted
+  move/discharge/class-change is bounced back out to the broadcast feed, rebuilt from census/world
+  state in registration's own message format - never a copy of the bytes that came in. A *rejected*
+  transfer (target bed occupied) gets the same treatment in reverse: registration rebroadcasts the
+  patient's actual current location right then, so Clinicals' picture of where they are self-corrects
+  instead of drifting further from the census every time a guess misses.
+
+### HospitalSim.Sink
+
+An MLLP black hole: accepts any number of concurrent connections, ACKs (`AA`) every message regardless
+of type or content, and stores/routes nothing. Point several of an engine's outbound interfaces
+(clinical, lab, rad, ...) at it when you need messages to actually flush out of a queue but don't have
+(or don't want) a real destination system standing behind each one.
+
+### HospitalSim.Ancillary
+
+One program, three services: Lab, Rad, and Path are the same code (`ANCILLARY_DEPARTMENT` picks the
+identity/catalog subset), run as three separate containers rather than tripled as three separate
+projects, since their behavior only ever differs by department, not by logic. Accepts an ORM^O01 from
+Clinicals, samples a turnaround time from that specific test's range in `ClinicalCatalog` (minutes for
+a STAT lactate, 1-3 days for a culture or surgical pathology - a real clock per order, not a coin flip),
+and fires an ORU^R01 back when it's up. Also implements the reflex pattern: a small chance
+(`ClinicalCatalog.ReflexRules` - e.g. an abnormal-looking TSH reflexing to a Free T4) that finishing one
+result triggers this department to originate a follow-up order on its own, which the ordering clinician
+never asked for. See the placer/filler handshake below for how that gets a proper order number.
+
+### HospitalSim.Clinicals
+
+The clinical system, and the one that actually owns a visit's lifecycle. Listens for ADT and tracks
+who's currently in, keyed by visit number (`VisitState`/`VisitStateStore`, persisted the same
+load-or-create way as Registration's world/census). ADT^A01 records someone in as inpatient, ADT^A04 as
+outpatient (both keep PV1-7, the attending doctor, as an opaque string - Clinicals never parses it into
+components, just echoes it back out later), ADT^A02 updates which unit a tracked visit is currently in,
+ADT^A06 promotes a tracked visit to inpatient, and ADT^A03 records someone out; anything else (a message
+missing PV1-19, a transfer/class-change for a visit it isn't tracking) is logged and skipped, not
+NAK'd - Clinicals only ever follows Registration's feed, it isn't a source of truth, so gaps are
+expected, not errors. It stays in sync on its own as Registration's messages keep arriving; always ACKs
+`AA` so nothing it doesn't understand yet ever blocks the queue. ADT^A02/A04/A06/A07 tell it who's
+currently tracked; ORU^R01 and ORM^O01 (see below) are the other two message types it now understands
+inbound, alongside ADT. It also *originates* traffic of its own, on two independent loops:
+
+- an order loop picks a visit (outpatients weighted `CLINICALS_OUTPATIENT_ORDER_WEIGHT`x heavier than
+  inpatients - a short outpatient stay is test-heavy, an inpatient stay gets sparse routine checks
+  only). Inpatient: `ClinicalCatalog.RoutineTests`, sent as an ORM^O01. Outpatient: usually a
+  full-catalog `OrderableTests` pick, also an ORM^O01, but sometimes (`CLINICALS_PROCEDURE_CHANCE`) a
+  `ClinicalCatalog.Procedures` entry instead - and a procedure is performed by Clinicals itself, not
+  ordered out to a separate department the way a lab/rad/path test is, so nothing goes out on the wire
+  for it at all (only the result would, once that's modeled - not built yet). Unlike Registration's ADT
+  broadcast, an order is point-to-point: each department (Lab/Rad/Path) is its own destination now
+  (`CLINICALS_LAB_MLLP_HOST` etc - Clinicals routes per department itself, playing the role an
+  interface engine's MSH-5 routing would elsewhere), and MSH-5 still names the department so a
+  downstream translation has something to route on too. PID-3 on an order is bare - just the
+  MR in PID-3.1, no assigning authority or identifier type - since nothing downstream of an order needs
+  more than that;
+- a lifecycle loop drives everything else off each visit's own clock, not a per-tick coin flip: at
+  record-in time (A01/A04/A06) a length of stay is sampled once (`CLINICALS_INPATIENT_LOS_*_HOURS` /
+  `CLINICALS_OUTPATIENT_LOS_*_HOURS`) and an ADT^A03 fires when it's up - a patient can't get
+  discharged moments after being admitted. Separately, each tick: only an ED or ICU boarder is a
+  transfer candidate (`CLINICALS_TRANSFER_CHANCE_PER_CHECK`, weighted `CLINICALS_ED_TRANSFER_WEIGHT`x
+  toward ED over ICU) - nobody already on a ward has a further step-down target defined. The target
+  itself follows a real rule (`StepDownTarget`), not a flat random pick: from the ED, ICU or the
+  age-appropriate ward (PEDS if the visit's DOB says under-18, otherwise MS3/MS4); from the ICU,
+  always straight to the age-appropriate ward, never back to the ED. An outpatient may instead get
+  promoted with an ADT^A06 (`CLINICALS_A06_CHANCE_PER_CHECK`) rather than ever discharging - "a small
+  chance of admitting them" - and, the mirror of that, an inpatient may get stepped back down with an
+  ADT^A07 (`CLINICALS_A07_CHANCE_PER_CHECK`), freeing their bed on registration's side without a full
+  discharge. Clinicals has no view of registration's actual bed layout (separate process, separate
+  state file), so a transfer's specific room/bed guess is still one registration is free to reject
+  even when the unit itself is the right call; an A06 proposes no location at all, since bed placement
+  there is registration's call, same as a fresh admit. Every one of these checks the ACK it gets back
+  (MSA-1) rather than assuming success - a NAK'd transfer/discharge/escalation/demotion logs distinctly
+  (`[TRANSFER-REJECTED]` etc.) instead of being written off as if it happened. Treating any ACK as a
+  success is exactly how Clinicals' picture of the world would silently drift from registration's
+  actual census over time. DOB is the one demographic Clinicals actually keeps (parsed from PID-7,
+  which registration's broadcast already carries) - it's what step-down routing above is age-aware
+  from. Everything else Clinicals never captured (sex, address, SSN, insurance) go out blank/unknown
+  rather than invented; IN1 is omitted entirely since Clinicals never tracked insurance at all.
 
 ### Order results and the reflex handshake
 
