@@ -21,11 +21,6 @@ var pathPort = int.Parse(Environment.GetEnvironmentVariable("CLINICALS_PATH_MLLP
 var adtHost = Environment.GetEnvironmentVariable("CLINICALS_ADT_MLLP_HOST") ?? "localhost";
 var adtPort = int.Parse(Environment.GetEnvironmentVariable("CLINICALS_ADT_MLLP_PORT") ?? "6660");
 var adtIntervalSeconds = double.Parse(Environment.GetEnvironmentVariable("CLINICALS_ADT_INTERVAL_SECONDS") ?? "30");
-// Units Clinicals will propose as a transfer target - it has no view of registration's actual bed
-// layout (separate process, separate state file), so this is a plausible guess, not a lookup.
-// Registration is still the one that decides whether the guessed bed is actually free.
-var transferUnits = (Environment.GetEnvironmentVariable("CLINICALS_TRANSFER_UNITS") ?? "ICU,MS3,MS4,PEDS")
-    .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 var outpatientLosMinHours = double.Parse(Environment.GetEnvironmentVariable("CLINICALS_OUTPATIENT_LOS_MIN_HOURS") ?? "1");
 var outpatientLosMaxHours = double.Parse(Environment.GetEnvironmentVariable("CLINICALS_OUTPATIENT_LOS_MAX_HOURS") ?? "6");
 var inpatientLosMinHours = double.Parse(Environment.GetEnvironmentVariable("CLINICALS_INPATIENT_LOS_MIN_HOURS") ?? "24");
@@ -140,20 +135,25 @@ async Task DischargeDueVisitsAsync()
             NextControlId(), now);
 
         var ack = await adtMllp.SendAsync(message, cts.Token);
-        Console.WriteLine($"[DISCHARGE] {visit.PatientFirstName} {visit.PatientLastName} (visit {visit.VisitNumber}) | ack: {SummarizeAck(ack)}");
+        var tag = WasAccepted(ack) ? "DISCHARGE" : "DISCHARGE-REJECTED";
+        Console.WriteLine($"[{tag}] {visit.PatientFirstName} {visit.PatientLastName} (visit {visit.VisitNumber}) | ack: {SummarizeAck(ack)}");
     }
 }
 
-// Only inpatients have a bed to move - an outpatient visit has nothing here to transfer. Someone
-// currently boarding in the ED is far more likely to actually need a move (to their real inpatient
-// unit) than someone already settled on a floor, so the pick is weighted, not uniform.
+// Only ED and ICU boarders have a defined step-down target - once someone's actually on a ward
+// (MS3/MS4/PEDS/L&D) there's nowhere further this simulator sends them, so they're not candidates
+// here at all, not just deprioritized. From the ED: critical care if it's serious - PICU for a kid,
+// ICU for an adult, never the adult unit for a child - otherwise the age-appropriate ward (PEDS/MS).
+// From ICU or PICU: always the matching ward directly, never back to the ED. Someone currently
+// boarding in the ED is more likely to actually need the move than someone already in critical care,
+// so the pick is weighted, not uniform.
 async Task MaybeTransferAsync()
 {
-    var inpatients = state.Snapshot().Where(v => v.Class == PatientClass.Inpatient).ToList();
-    if (inpatients.Count == 0 || rng.NextDouble() >= transferChancePerCheck) return;
+    var candidates = state.Snapshot().Where(v => v.Class == PatientClass.Inpatient && v.CurrentUnit is "ED" or "ICU" or "PICU").ToList();
+    if (candidates.Count == 0 || rng.NextDouble() >= transferChancePerCheck) return;
 
-    var visit = PickWeighted(inpatients, v => v.CurrentUnit == "ED" ? edTransferWeight : 1);
-    var unit = transferUnits[rng.Next(transferUnits.Length)];
+    var visit = PickWeighted(candidates, v => v.CurrentUnit == "ED" ? edTransferWeight : 1);
+    var unit = StepDownTarget(visit);
     var room = rng.Next(1, 21).ToString("000");
     var bed = ((char)('A' + rng.Next(2))).ToString();
 
@@ -166,7 +166,8 @@ async Task MaybeTransferAsync()
         NextControlId(), DateTime.UtcNow);
 
     var ack = await adtMllp.SendAsync(message, cts.Token);
-    Console.WriteLine($"[TRANSFER]  {visit.PatientFirstName} {visit.PatientLastName} (visit {visit.VisitNumber}, currently {visit.CurrentUnit}) -> proposing {unit} | ack: {SummarizeAck(ack)}");
+    var tag = WasAccepted(ack) ? "TRANSFER" : "TRANSFER-REJECTED";
+    Console.WriteLine($"[{tag}]  {visit.PatientFirstName} {visit.PatientLastName} (visit {visit.VisitNumber}, currently {visit.CurrentUnit}) -> proposing {unit} | ack: {SummarizeAck(ack)}");
 }
 
 // A small chance any given outpatient visit turns out to need admission after all, rather than always
@@ -188,7 +189,8 @@ async Task MaybeEscalateAsync()
         NextControlId(), DateTime.UtcNow);
 
     var ack = await adtMllp.SendAsync(message, cts.Token);
-    Console.WriteLine($"[ESCALATE]  {visit.PatientFirstName} {visit.PatientLastName} (visit {visit.VisitNumber}) outpatient -> inpatient | ack: {SummarizeAck(ack)}");
+    var tag = WasAccepted(ack) ? "ESCALATE" : "ESCALATE-REJECTED";
+    Console.WriteLine($"[{tag}]  {visit.PatientFirstName} {visit.PatientLastName} (visit {visit.VisitNumber}) outpatient -> inpatient | ack: {SummarizeAck(ack)}");
 }
 
 // The mirror of MaybeEscalateAsync: an inpatient who no longer needs the bed gets stepped back down
@@ -209,7 +211,25 @@ async Task MaybeDemoteAsync()
         NextControlId(), DateTime.UtcNow);
 
     var ack = await adtMllp.SendAsync(message, cts.Token);
-    Console.WriteLine($"[DEMOTE]    {visit.PatientFirstName} {visit.PatientLastName} (visit {visit.VisitNumber}) inpatient -> outpatient | ack: {SummarizeAck(ack)}");
+    var tag = WasAccepted(ack) ? "DEMOTE" : "DEMOTE-REJECTED";
+    Console.WriteLine($"[{tag}]    {visit.PatientFirstName} {visit.PatientLastName} (visit {visit.VisitNumber}) inpatient -> outpatient | ack: {SummarizeAck(ack)}");
+}
+
+// MSA-1 - "AA" is the only accept code this simulator's own AckBuilder ever sends, so anything else
+// (or an unparseable ack) is treated as rejected. Every lifecycle action checks this now instead of
+// logging whatever came back and assuming it worked - a NAK'd transfer/discharge/class-change didn't
+// actually happen, and silently treating it as if it did is exactly how Clinicals' view of the world
+// drifts from registration's actual census.
+bool WasAccepted(string ack)
+{
+    try
+    {
+        return Hl7ParsedMessage.Parse(ack).Field("MSA", 1) == "AA";
+    }
+    catch
+    {
+        return false;
+    }
 }
 
 T PickWeighted<T>(List<T> items, Func<T, int> weight)
@@ -220,6 +240,25 @@ T PickWeighted<T>(List<T> items, Func<T, int> weight)
         for (var i = 0; i < Math.Max(1, weight(item)); i++) weighted.Add(item);
     }
     return weighted[rng.Next(weighted.Count)];
+}
+
+// ED can send someone straight to critical care or on to their age-appropriate ward; critical care
+// only ever graduates to the matching ward. A visit whose DOB Clinicals never learned (PID-7 missing)
+// is treated as an adult - no better information to go on.
+string StepDownTarget(Visit visit)
+{
+    var isChild = visit.DateOfBirth is { } dob && Age(dob) < 18;
+    var criticalCare = isChild ? "PICU" : "ICU";
+    var ward = isChild ? "PEDS" : rng.NextDouble() < 0.5 ? "MS3" : "MS4";
+    return visit.CurrentUnit == "ED" && rng.NextDouble() < 0.5 ? criticalCare : ward;
+}
+
+int Age(DateOnly dob)
+{
+    var today = DateOnly.FromDateTime(DateTime.UtcNow);
+    var age = today.Year - dob.Year;
+    if (dob > today.AddYears(-age)) age--;
+    return age;
 }
 
 TimeSpan SampleLengthOfStay(PatientClass patientClass) => patientClass == PatientClass.Inpatient
@@ -339,6 +378,7 @@ void RecordAdmit(Hl7ParsedMessage parsed)
     var firstName = parsed.Component("PID", 5, 2);
     var orderingProvider = parsed.Field("PV1", 7);
     var unit = parsed.Component("PV1", 3, 1) ?? "";
+    var dob = ParseDob(parsed.Field("PID", 7));
 
     if (string.IsNullOrEmpty(visitNumber) || string.IsNullOrEmpty(patientId))
     {
@@ -347,7 +387,7 @@ void RecordAdmit(Hl7ParsedMessage parsed)
     }
 
     var now = DateTime.UtcNow;
-    state.RecordIn(new Visit(visitNumber, patientId, firstName ?? "", lastName ?? "", orderingProvider, PatientClass.Inpatient, unit, now, now + SampleLengthOfStay(PatientClass.Inpatient)));
+    state.RecordIn(new Visit(visitNumber, patientId, firstName ?? "", lastName ?? "", orderingProvider, PatientClass.Inpatient, unit, dob, now, now + SampleLengthOfStay(PatientClass.Inpatient)));
     VisitStateStore.Save(state, statePath);
     Console.WriteLine($"[IN]        {firstName} {lastName} (visit {visitNumber}), {unit}");
 }
@@ -359,6 +399,7 @@ void RecordRegister(Hl7ParsedMessage parsed)
     var lastName = parsed.Component("PID", 5, 1);
     var firstName = parsed.Component("PID", 5, 2);
     var orderingProvider = parsed.Field("PV1", 7);
+    var dob = ParseDob(parsed.Field("PID", 7));
 
     if (string.IsNullOrEmpty(visitNumber) || string.IsNullOrEmpty(patientId))
     {
@@ -367,10 +408,13 @@ void RecordRegister(Hl7ParsedMessage parsed)
     }
 
     var now = DateTime.UtcNow;
-    state.RecordIn(new Visit(visitNumber, patientId, firstName ?? "", lastName ?? "", orderingProvider, PatientClass.Outpatient, "", now, now + SampleLengthOfStay(PatientClass.Outpatient)));
+    state.RecordIn(new Visit(visitNumber, patientId, firstName ?? "", lastName ?? "", orderingProvider, PatientClass.Outpatient, "", dob, now, now + SampleLengthOfStay(PatientClass.Outpatient)));
     VisitStateStore.Save(state, statePath);
     Console.WriteLine($"[REGISTER]  {firstName} {lastName} (visit {visitNumber})");
 }
+
+DateOnly? ParseDob(string? field) =>
+    !string.IsNullOrEmpty(field) && DateOnly.TryParseExact(field, "yyyyMMdd", out var dob) ? dob : null;
 
 void RecordTransfer(Hl7ParsedMessage parsed)
 {

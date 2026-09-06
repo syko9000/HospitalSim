@@ -17,27 +17,43 @@ generator that can point at any HL7 receiver.
   (a hospital with ~250 families / ~750 people, 18 doctors across specialties, 5 insurers, 6 nursing
   units). It then does three things concurrently:
   - an arrival loop, on an interval shaped by hour-of-day and day-of-week (`ArrivalRateMultiplier` -
-    quiet overnight, busiest evening, a modest Friday/Saturday bump), picks a random not-yet-in-system
-    person and queues them as a `PendingArrival` with a real wait span before anyone decides what
-    happens to them - not persisted, since a restart mid-wait losing one pending arrival is a fine
-    simplification for a demo tool;
-  - a disposition loop checks that queue for anyone whose wait is up and rolls their disposition:
-    inpatient (`HOSPITALSIM_INPATIENT_PROBABILITY`, needs a free bed - falls back to outpatient if none
-    is available) sends an ADT^A01, everyone else sends an ADT^A04 (registered, no bed - PV1-2 carries
-    `O`, not `I`). Every admit/register carries an OBX with LOINC 8661-1 (Chief Complaint) and a random
-    reason for the visit (`ClinicalCatalog.ChiefComplaints` in `HospitalSim.World`), giving a downstream
-    clinical system something to actually react to. Registration deliberately never originates a
-    transfer, discharge, or class change itself past this point - all three are clinical decisions;
+    quiet overnight, busiest evening, a modest Friday/Saturday bump), rolls a random `ArrivalChannel`
+    (`ED` / `ChildrensWard` / `FrontDesk` / `LaborAndDelivery`, relative likelihood set by
+    `HOSPITALSIM_CHANNEL_WEIGHT_*`) and queues an eligible not-yet-in-system person for it as a
+    `PendingArrival`, with a real wait span before anyone decides what happens to them - not persisted,
+    since a restart mid-wait losing one pending arrival is a fine simplification for a demo tool. The
+    channel is what someone actually is, not flavor text: `ChildrensWard` only takes under-18s and heads
+    straight for PEDS, `LaborAndDelivery` only takes female patients in the configured childbearing age
+    range (`HOSPITALSIM_CHILDBEARING_MIN_AGE`/`_MAX_AGE`) and only heads for L&D - there's no other way
+    into either of those two units - `FrontDesk` (scheduled procedures/surgery) heads for MS3/MS4, and
+    `ED` is `ED`. The wait scales with how full *that channel's own target unit(s)* currently are, never
+    whole-hospital occupancy - an empty ICU doesn't get an ED patient seen faster, and a full one doesn't
+    slow down a scheduled front-desk admission;
+  - a disposition loop checks that queue for anyone whose wait is up and rolls their disposition within
+    the channel's own target unit(s) only (`ChildrensWard`/`LaborAndDelivery` are always inpatient -
+    nobody walks in there just to go home; `ED`/`FrontDesk` still roll the normal
+    `HOSPITALSIM_INPATIENT_PROBABILITY` coin flip, falling back to outpatient if nothing in that
+    channel's unit(s) is free) sends an ADT^A01, everyone else sends an ADT^A04 (registered, no bed -
+    PV1-2 carries `O`, not `I`). Every admit/register carries an OBX with LOINC 8661-1 (Chief Complaint)
+    and a random reason for the visit (`ClinicalCatalog.ChiefComplaints` in `HospitalSim.World`), giving
+    a downstream clinical system something to actually react to. Registration deliberately never
+    originates a transfer, discharge, or class change itself past this point - all three are clinical
+    decisions;
   - listens on its own MLLP port for inbound ADT^A02 (transfer, inpatient only - an outpatient has no
     bed to move), ADT^A03 (discharge, either class), and ADT^A06 (outpatient -> inpatient class change -
-    registration picks the actual bed here, unlike a transfer's specific requested target), so a
-    clinical system can drive all three the way real hospitals' feeder systems talk back to
-    registration. PID-3.1 is only trusted as the patient's MR when PID-3.4 (assigning authority) and
-    PID-3.5 (identifier type code) actually qualify it as one - a bare, unqualified PID-3.1 gets NAK'd,
-    same as an unrecognized message type, a patient in the wrong class for what's being asked, or a
-    target bed that's already occupied. An accepted move/discharge/class-change is bounced back out to
-    the broadcast feed, rebuilt from census/world state in registration's own message format - never a
-    copy of the bytes that came in.
+    registration picks the actual bed here, unlike a transfer's specific requested target; unlike a
+    fresh arrival's channel-scoped search, this checks the general `EligibleUnit` filter - PEDS<18,
+    L&D=female - across every unit, since an A06 isn't tied to any particular channel), so a clinical
+    system can drive all three the way real hospitals' feeder systems talk back to registration. PID-3.1
+    is only trusted as the patient's MR when PID-3.4 (assigning authority) and PID-3.5 (identifier type
+    code) actually qualify it as one - a
+    bare, unqualified PID-3.1 gets NAK'd, same as an unrecognized message type, a patient in the wrong
+    class for what's being asked, or a target bed that's already occupied. An accepted
+    move/discharge/class-change is bounced back out to the broadcast feed, rebuilt from census/world
+    state in registration's own message format - never a copy of the bytes that came in. A *rejected*
+    transfer (target bed occupied) gets the same treatment in reverse: registration rebroadcasts the
+    patient's actual current location right then, so Clinicals' picture of where they are self-corrects
+    instead of drifting further from the census every time a guess misses.
 - `HospitalSim.Sink` — an MLLP black hole: accepts any number of concurrent connections, ACKs (`AA`)
   every message regardless of type or content, and stores/routes nothing. Point several of an engine's
   outbound interfaces (clinical, lab, rad, ...) at it when you need messages to actually flush out of
@@ -81,17 +97,26 @@ generator that can point at any HL7 receiver.
   - a lifecycle loop drives everything else off each visit's own clock, not a per-tick coin flip: at
     record-in time (A01/A04/A06) a length of stay is sampled once (`CLINICALS_INPATIENT_LOS_*_HOURS` /
     `CLINICALS_OUTPATIENT_LOS_*_HOURS`) and an ADT^A03 fires when it's up - a patient can't get
-    discharged moments after being admitted. Separately, each tick: an inpatient may get an ADT^A02 to a
-    guessed unit/room/bed (`CLINICALS_TRANSFER_CHANCE_PER_CHECK`, weighted `CLINICALS_ED_TRANSFER_WEIGHT`x
-    toward whoever's currently sitting in the ED - a boarder is far more likely to need a real bed than
-    someone already settled on a floor); an outpatient may instead get promoted with an ADT^A06
-    (`CLINICALS_A06_CHANCE_PER_CHECK`) rather than ever discharging - "a small chance of admitting them" -
-    and, the mirror of that, an inpatient may get stepped back down with an ADT^A07
-    (`CLINICALS_A07_CHANCE_PER_CHECK`), freeing their bed on registration's side without a full discharge.
-    Clinicals has no view of registration's actual bed layout (separate process, separate state file),
-    so a transfer's proposed location is a guess registration is free to reject; an A06 proposes no
-    location at all, since bed placement there is registration's call, same as a fresh admit. Demographics
-    Clinicals never captured (DOB, sex, address, SSN, insurance) go out blank/unknown rather than
+    discharged moments after being admitted. Separately, each tick: only an ED or ICU boarder is a
+    transfer candidate (`CLINICALS_TRANSFER_CHANCE_PER_CHECK`, weighted `CLINICALS_ED_TRANSFER_WEIGHT`x
+    toward ED over ICU) - nobody already on a ward has a further step-down target defined. The target
+    itself follows a real rule (`StepDownTarget`), not a flat random pick: from the ED, ICU or the
+    age-appropriate ward (PEDS if the visit's DOB says under-18, otherwise MS3/MS4); from the ICU,
+    always straight to the age-appropriate ward, never back to the ED. An outpatient may instead get
+    promoted with an ADT^A06 (`CLINICALS_A06_CHANCE_PER_CHECK`) rather than ever discharging - "a small
+    chance of admitting them" - and, the mirror of that, an inpatient may get stepped back down with an
+    ADT^A07 (`CLINICALS_A07_CHANCE_PER_CHECK`), freeing their bed on registration's side without a full
+    discharge. Clinicals has no view of registration's actual bed layout (separate process, separate
+    state file), so a transfer's specific room/bed guess is still one registration is free to reject
+    even when the unit itself is the right call; an A06 proposes no location at all, since bed placement
+    there is registration's call, same as a fresh admit. Every one of these checks the ACK it gets back
+    (MSA-1) rather than assuming success - a NAK'd transfer/discharge/escalation/demotion logs distinctly
+    (`[TRANSFER-REJECTED]` etc.) instead of being written off as if it happened. Treating any ACK as a
+    success is exactly how Clinicals' picture of the world would silently drift from registration's
+    actual census over time. DOB is the one demographic Clinicals actually keeps (parsed from PID-7,
+    which registration's broadcast already carries) - it's what step-down routing above is age-aware
+    from. Everything else Clinicals never captured (sex, address, SSN, insurance) go out blank/unknown
+    rather than
     invented; IN1 is omitted entirely since Clinicals never tracked insurance at all.
 
 ### Order results and the reflex handshake
@@ -152,8 +177,10 @@ Registration's environment variables (all optional):
 | `HOSPITALSIM_LISTEN_PORT` | `6660` | port Registration listens on for inbound ADT^A02/A03/A06/A07 |
 | `HOSPITALSIM_INTERVAL_SECONDS` | `300` | average seconds between new arrivals at baseline (day/night and weekday shaped from there) |
 | `HOSPITALSIM_WAIT_MIN_MINUTES` / `HOSPITALSIM_WAIT_MAX_MINUTES` | `5` / `60` | how long an arrival waits before disposition is decided |
-| `HOSPITALSIM_INPATIENT_PROBABILITY` | `0.3` | chance a disposition is decided inpatient rather than outpatient (falls back to outpatient anyway if no bed's free) |
+| `HOSPITALSIM_INPATIENT_PROBABILITY` | `0.3` | chance an ED/FrontDesk disposition is decided inpatient rather than outpatient (falls back to outpatient anyway if nothing in that channel's unit(s) is free) |
 | `HOSPITALSIM_DISPOSITION_CHECK_SECONDS` | `20` | how often the pending-arrivals queue is checked for anyone whose wait is up |
+| `HOSPITALSIM_CHANNEL_WEIGHT_ED` / `_CHILDRENS_WARD` / `_FRONT_DESK` / `_LABOR_AND_DELIVERY` | `60` / `10` / `25` / `5` | relative likelihood of each arrival channel (normalized against each other, not absolute percentages) |
+| `HOSPITALSIM_CHILDBEARING_MIN_AGE` / `_MAX_AGE` | `14` / `50` | age range eligible for the `LaborAndDelivery` arrival channel |
 | `HOSPITALSIM_SENDING_APP` / `HOSPITALSIM_SENDING_FACILITY` | `REGISTRATION` / `WRMC` | MSH-3/MSH-4, and Registration's own identity on ACKs it sends |
 
 The 300s/5-60min defaults are a starting guess for a long-running instance, not a tuned steady state -
@@ -189,7 +216,6 @@ Clinicals' environment variables (all optional):
 | `CLINICALS_ADT_MLLP_HOST` | `localhost` | registration's inbound ADT listener host |
 | `CLINICALS_ADT_MLLP_PORT` | `6660` | registration's inbound ADT listener port |
 | `CLINICALS_ADT_INTERVAL_SECONDS` | `30` | average seconds between lifecycle checks (discharge-due scan, transfer/class-change rolls) |
-| `CLINICALS_TRANSFER_UNITS` | `ICU,MS3,MS4,PEDS` | nursing unit codes Clinicals guesses at when proposing a transfer target |
 | `CLINICALS_OUTPATIENT_LOS_MIN_HOURS` / `_MAX_HOURS` | `1` / `6` | sampled outpatient length-of-stay range |
 | `CLINICALS_INPATIENT_LOS_MIN_HOURS` / `_MAX_HOURS` | `24` / `72` | sampled inpatient length-of-stay range |
 | `CLINICALS_TRANSFER_CHANCE_PER_CHECK` | `0.08` | chance an eligible inpatient gets an A02 offered on a given lifecycle check |

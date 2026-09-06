@@ -32,4 +32,15 @@ public sealed class Hl7Message
             .Replace("^", "\\S\\")
             .Replace("&", "\\T\\")
             .Replace("~", "\\R\\");
+
+    // The exact reverse of EscapeField, applied in reverse order - \E\ (a literal backslash) has to be
+    // resolved last, or a backslash it produces could get mistaken for the start of one of the other
+    // escape sequences still waiting to be unescaped.
+    public static string UnescapeField(string? value) =>
+        (value ?? string.Empty)
+            .Replace("\\R\\", "~")
+            .Replace("\\T\\", "&")
+            .Replace("\\S\\", "^")
+            .Replace("\\F\\", "|")
+            .Replace("\\E\\", "\\");
 }

@@ -50,12 +50,17 @@ public sealed class Census(Hospital hospital)
 
     public string NextVisitNumber() => $"V{DateTime.UtcNow:yyyyMMdd}{_visitSeq++:0000}";
 
-    public (string unitId, string bedId, string room, string bed)? FindFreeBed(string? preferUnitId = null)
+    // unitFilter excludes units the patient isn't eligible for (PEDS below some age, L&D by sex, ...) -
+    // applied before picking, not after, so an ineligible unit's beds are never even considered, not
+    // just skipped once offered.
+    public (string unitId, string bedId, string room, string bed)? FindFreeBed(string? preferUnitId = null, Func<NursingUnit, bool>? unitFilter = null)
     {
         var units = preferUnitId is null
             ? hospital.NursingUnits
             : hospital.NursingUnits.Where(u => u.Id == preferUnitId)
                 .Concat(hospital.NursingUnits.Where(u => u.Id != preferUnitId));
+
+        if (unitFilter is not null) units = units.Where(unitFilter);
 
         foreach (var unit in units)
         {

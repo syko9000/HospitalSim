@@ -38,18 +38,24 @@ public sealed class Hl7ParsedMessage
         return new Hl7ParsedMessage(segments, messageType, controlId);
     }
 
-    public string? Field(string segmentId, int fieldNumber)
+    public string? Field(string segmentId, int fieldNumber) =>
+        RawField(segmentId, fieldNumber) is { } raw ? Hl7Message.UnescapeField(raw) : null;
+
+    public string? Component(string segmentId, int fieldNumber, int componentNumber)
+    {
+        // Split the raw, still-escaped text, not Field()'s unescaped result - an escaped literal ^
+        // (\S\) must survive as component text, not get mistaken for a real separator. Only the
+        // final extracted piece gets unescaped, same as Field() does for a whole field.
+        var raw = RawField(segmentId, fieldNumber);
+        if (string.IsNullOrEmpty(raw)) return null;
+        var components = raw.Split('^');
+        return componentNumber - 1 < components.Length ? Hl7Message.UnescapeField(components[componentNumber - 1]) : null;
+    }
+
+    private string? RawField(string segmentId, int fieldNumber)
     {
         if (!_segments.TryGetValue(segmentId, out var fields)) return null;
         var index = segmentId == "MSH" ? fieldNumber - 2 : fieldNumber - 1;
         return index >= 0 && index < fields.Length ? fields[index] : null;
-    }
-
-    public string? Component(string segmentId, int fieldNumber, int componentNumber)
-    {
-        var field = Field(segmentId, fieldNumber);
-        if (string.IsNullOrEmpty(field)) return null;
-        var components = field.Split('^');
-        return componentNumber - 1 < components.Length ? components[componentNumber - 1] : null;
     }
 }

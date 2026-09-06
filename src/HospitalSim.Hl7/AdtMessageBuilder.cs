@@ -128,7 +128,11 @@ public static class AdtMessageBuilder
         var pv1 = new string[45];
         pv1[0] = "1";
         pv1[1] = visit.Class == PatientClass.Inpatient ? "I" : "O";
-        pv1[2] = $"{visit.PointOfCare}^{visit.Room}^{visit.Bed}^{sendingFacility}";
+        // PointOfCare is a nursing unit name/id someone configured, not system-generated like Room/Bed
+        // - "L&D" is a real example already in this catalog, and a literal & is HL7's subcomponent
+        // separator (part of this project's own encoding chars, "^~\&"). Escape it rather than assume
+        // no unit name will ever collide with an encoding character.
+        pv1[2] = $"{Hl7Message.EscapeField(visit.PointOfCare)}^{visit.Room}^{visit.Bed}^{Hl7Message.EscapeField(sendingFacility)}";
         pv1[6] = visit.AttendingDoctor;
         pv1[18] = visit.VisitNumber;
         if (eventType == AdtEventType.A03_Discharge)

@@ -26,7 +26,8 @@ public sealed class WorldGenerator(int seed)
                 new NursingUnit { Id = "MS3", Name = "Medical/Surgical 3rd Floor", RoomCount = 20, BedsPerRoom = 2 },
                 new NursingUnit { Id = "MS4", Name = "Medical/Surgical 4th Floor", RoomCount = 20, BedsPerRoom = 2 },
                 new NursingUnit { Id = "L&D", Name = "Labor & Delivery", RoomCount = 8, BedsPerRoom = 1 },
-                new NursingUnit { Id = "PEDS", Name = "Pediatrics", RoomCount = 10, BedsPerRoom = 1 },
+                new NursingUnit { Id = "PEDS", Name = "The Kimberly Martin Wing", RoomCount = 10, BedsPerRoom = 1 },
+                new NursingUnit { Id = "PICU", Name = "Pediatric ICU - Kimberly Martin Wing", RoomCount = 4, BedsPerRoom = 1 },
             ],
         };
 

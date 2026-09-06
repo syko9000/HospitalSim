@@ -4,6 +4,10 @@ namespace HospitalSim.Clinicals;
 
 // CurrentUnit is "" for an Outpatient (or an Inpatient Clinicals hasn't heard a location for yet) -
 // deliberately still a follower here, same as the class doc below says about the rest of this state.
+// DateOfBirth is the one demographic Clinicals actually keeps (parsed from PID-7, which registration's
+// broadcast already carries) - everything else stays unknown by design, but step-down routing (ER/ICU
+// to PEDS vs. MS, see Program.cs) is genuinely age-dependent, so this one has a real behavioral use,
+// not just completeness. Nullable since a message missing PID-7 shouldn't be a hard failure.
 public sealed record Visit(
     string VisitNumber,
     string PatientId,
@@ -12,6 +16,7 @@ public sealed record Visit(
     string? OrderingProvider,
     PatientClass Class,
     string CurrentUnit,
+    DateOnly? DateOfBirth,
     DateTime AdmitDateTime,
     DateTime PlannedDischargeAt);
 

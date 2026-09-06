@@ -11,6 +11,16 @@ var waitMinMinutes = double.Parse(Environment.GetEnvironmentVariable("HOSPITALSI
 var waitMaxMinutes = double.Parse(Environment.GetEnvironmentVariable("HOSPITALSIM_WAIT_MAX_MINUTES") ?? "60");
 var inpatientProbability = double.Parse(Environment.GetEnvironmentVariable("HOSPITALSIM_INPATIENT_PROBABILITY") ?? "0.3");
 var dispositionCheckSeconds = double.Parse(Environment.GetEnvironmentVariable("HOSPITALSIM_DISPOSITION_CHECK_SECONDS") ?? "20");
+// Relative likelihood of each arrival channel - normalized against each other, not absolute
+// percentages. ED dominates (most unscheduled admissions really do come through the door), front
+// desk (scheduled procedures/surgery) is a meaningful chunk, the children's ward and L&D are each
+// their own smaller, restricted stream.
+var edWeight = double.Parse(Environment.GetEnvironmentVariable("HOSPITALSIM_CHANNEL_WEIGHT_ED") ?? "60");
+var childrensWardWeight = double.Parse(Environment.GetEnvironmentVariable("HOSPITALSIM_CHANNEL_WEIGHT_CHILDRENS_WARD") ?? "10");
+var frontDeskWeight = double.Parse(Environment.GetEnvironmentVariable("HOSPITALSIM_CHANNEL_WEIGHT_FRONT_DESK") ?? "25");
+var laborAndDeliveryWeight = double.Parse(Environment.GetEnvironmentVariable("HOSPITALSIM_CHANNEL_WEIGHT_LABOR_AND_DELIVERY") ?? "5");
+var childbearingMinAge = int.Parse(Environment.GetEnvironmentVariable("HOSPITALSIM_CHILDBEARING_MIN_AGE") ?? "14");
+var childbearingMaxAge = int.Parse(Environment.GetEnvironmentVariable("HOSPITALSIM_CHILDBEARING_MAX_AGE") ?? "50");
 var sendingApp = Environment.GetEnvironmentVariable("HOSPITALSIM_SENDING_APP") ?? "REGISTRATION";
 var sendingFacility = Environment.GetEnvironmentVariable("HOSPITALSIM_SENDING_FACILITY") ?? "WRMC";
 var listenPort = int.Parse(Environment.GetEnvironmentVariable("HOSPITALSIM_LISTEN_PORT") ?? "6660");
@@ -116,17 +126,64 @@ double ArrivalRateMultiplier(DateTime now)
     return hourly[now.Hour] * weekendBump;
 }
 
+bool ChannelEligible(ArrivalChannel channel, Person patient) => channel switch
+{
+    ArrivalChannel.ChildrensWard => Age(patient) < 18,
+    ArrivalChannel.LaborAndDelivery => patient.Sex == Sex.Female && Age(patient) >= childbearingMinAge && Age(patient) <= childbearingMaxAge,
+    _ => true, // ED and the front desk take anyone
+};
+
+string[] ChannelTargetUnits(ArrivalChannel channel) => channel switch
+{
+    ArrivalChannel.ED => ["ED"],
+    ArrivalChannel.ChildrensWard => ["PEDS"],
+    ArrivalChannel.FrontDesk => ["MS3", "MS4"],
+    ArrivalChannel.LaborAndDelivery => ["L&D"],
+    _ => [],
+};
+
+// A direct children's-ward or L&D arrival already implies inpatient care is needed - nobody gets
+// walked in there just to be sent home. ED and the front desk both still roll the normal coin flip
+// (most ED visits go home; front-desk same-day procedures vs. an inpatient surgical stay are both real).
+bool ChannelAlwaysInpatient(ArrivalChannel channel) => channel is ArrivalChannel.ChildrensWard or ArrivalChannel.LaborAndDelivery;
+
+ArrivalChannel PickChannel()
+{
+    var weights = new (ArrivalChannel channel, double weight)[]
+    {
+        (ArrivalChannel.ED, edWeight),
+        (ArrivalChannel.ChildrensWard, childrensWardWeight),
+        (ArrivalChannel.FrontDesk, frontDeskWeight),
+        (ArrivalChannel.LaborAndDelivery, laborAndDeliveryWeight),
+    };
+    var roll = rng.NextDouble() * weights.Sum(w => w.weight);
+    var cumulative = 0.0;
+    foreach (var (channel, weight) in weights)
+    {
+        cumulative += weight;
+        if (roll < cumulative) return channel;
+    }
+    return ArrivalChannel.ED;
+}
+
 void EnqueueArrival()
 {
+    var channel = PickChannel();
     var candidates = world.People
-        .Where(p => !census.IsAdmitted(p.Id) && !pending.Any(a => a.Patient.Id == p.Id))
+        .Where(p => !census.IsAdmitted(p.Id) && !pending.Any(a => a.Patient.Id == p.Id) && ChannelEligible(channel, p))
         .ToList();
-    if (candidates.Count == 0) return;
+    if (candidates.Count == 0) return; // nobody eligible for this channel right now - skip, the next roll tries again
 
     var patient = candidates[rng.Next(candidates.Count)];
-    var waitMinutes = waitMinMinutes + rng.NextDouble() * (waitMaxMinutes - waitMinMinutes);
-    pending.Add(new PendingArrival(patient, DateTime.UtcNow.AddMinutes(waitMinutes)));
-    Console.WriteLine($"[ARRIVE]  {patient.FirstName} {patient.LastName} - waiting ~{waitMinutes:0} min to be seen");
+    // A fuller hospital means a longer wait to be seen - but "fuller" has to mean the capacity that
+    // would actually see this patient: PEDS occupancy for a children's-ward arrival, ED occupancy for
+    // an ED arrival, and so on - not whole-hospital occupancy, which doesn't reflect who's actually
+    // competing for the same beds. Still some jitter so it's not purely deterministic by the numbers.
+    var occupancyFraction = OccupancyFractionForChannel(channel);
+    var baseWaitMinutes = waitMinMinutes + occupancyFraction * (waitMaxMinutes - waitMinMinutes);
+    var waitMinutes = Math.Clamp(baseWaitMinutes * (0.7 + rng.NextDouble() * 0.6), waitMinMinutes, waitMaxMinutes);
+    pending.Add(new PendingArrival(patient, channel, DateTime.UtcNow.AddMinutes(waitMinutes)));
+    Console.WriteLine($"[ARRIVE]  {patient.FirstName} {patient.LastName} via {channel} - waiting ~{waitMinutes:0} min to be seen");
 }
 
 async Task ProcessDueDispositionsAsync()
@@ -136,21 +193,22 @@ async Task ProcessDueDispositionsAsync()
     foreach (var arrival in due)
     {
         pending.Remove(arrival);
-        await DecideDispositionAsync(arrival.Patient);
+        await DecideDispositionAsync(arrival.Patient, arrival.Channel);
     }
 }
 
-async Task DecideDispositionAsync(Person patient)
+async Task DecideDispositionAsync(Person patient, ArrivalChannel channel)
 {
     if (census.IsAdmitted(patient.Id)) return; // already handled some other way - shouldn't happen, but never double up
 
     var doctor = world.Doctors[rng.Next(world.Doctors.Count)];
-    var wantsInpatient = rng.NextDouble() < inpatientProbability;
-    var bed = wantsInpatient ? census.FindFreeBed() : null;
+    var targetUnits = ChannelTargetUnits(channel);
+    var wantsInpatient = ChannelAlwaysInpatient(channel) || rng.NextDouble() < inpatientProbability;
+    var bed = wantsInpatient ? census.FindFreeBed(unitFilter: unit => targetUnits.Contains(unit.Id)) : null;
     var actualClass = bed is null ? PatientClass.Outpatient : PatientClass.Inpatient;
     if (wantsInpatient && bed is null)
     {
-        Console.WriteLine($"[DISPOSE] No free beds for {patient.FirstName} {patient.LastName} - registering outpatient instead.");
+        Console.WriteLine($"[DISPOSE] No free beds for {patient.FirstName} {patient.LastName} via {channel} - registering outpatient instead.");
     }
 
     var visitNumber = census.NextVisitNumber();
@@ -268,6 +326,12 @@ async Task<string> HandleInboundAsync(string rawMessage)
         if (bedId != admission.BedId && !census.IsBedFree(bedId))
         {
             Console.WriteLine($"[INBOUND]   A02 target bed {bedId} is already occupied");
+            // Clinicals guessed wrong, which means its picture of this patient's real location has
+            // already drifted from the census (otherwise it wouldn't have proposed an occupied bed as
+            // if it were free). A NAK alone doesn't fix that - Clinicals has no way to learn the truth
+            // from a rejection text. Re-assert the patient's actual current location as a fresh A02, so
+            // the drift self-corrects instead of accumulating silently until something like this happens.
+            await BroadcastAsync(AdtEventType.A02_Transfer, admission);
             return AckBuilder.Build(sendingApp, sendingFacility, inboundApp, inboundFacility, parsed.MessageControlId, now, accept: false, "Target bed occupied");
         }
 
@@ -299,7 +363,7 @@ async Task<string> HandleInboundAsync(string rawMessage)
 
         // The bed itself is registration's call, not clinical's - unlike an A02's specific target,
         // any free bed will do here, the same as a fresh admit.
-        var bed = census.FindFreeBed();
+        var bed = census.FindFreeBed(unitFilter: unit => EligibleUnit(patient, unit));
         if (bed is null)
         {
             Console.WriteLine($"[INBOUND]   A06 for {patient.FirstName} {patient.LastName} - no free beds");
@@ -333,6 +397,38 @@ async Task<string> HandleInboundAsync(string rawMessage)
     return AckBuilder.Build(sendingApp, sendingFacility, inboundApp, inboundFacility, parsed.MessageControlId, now, accept: true);
 }
 
+// PEDS/PICU/L&D aren't general-purpose the way ED/ICU/MS3/MS4 are - a unit a patient isn't eligible
+// for is excluded from FindFreeBed entirely, not just skipped after being offered. ICU and PICU split
+// the same way PEDS and general wards do - critical care for a kid belongs in a pediatric ICU, not the
+// adult one, so ICU itself is now adults-only rather than age-agnostic.
+bool EligibleUnit(Person patient, NursingUnit unit) => unit.Id switch
+{
+    "PEDS" or "PICU" => Age(patient) < 18,
+    "ICU" => Age(patient) >= 18,
+    "L&D" => patient.Sex == Sex.Female,
+    _ => true,
+};
+
+int Age(Person patient)
+{
+    var today = DateOnly.FromDateTime(DateTime.UtcNow);
+    var age = today.Year - patient.DateOfBirth.Year;
+    if (patient.DateOfBirth > today.AddYears(-age)) age--;
+    return age;
+}
+
+// The congestion signal behind a wait time has to be the capacity that would actually see this
+// arrival - only ED beds for an ED arrival, only PEDS for the children's ward, MS3+MS4 combined for
+// the front desk, only L&D for L&D. Never whole-hospital occupancy - an empty ICU doesn't get an ED
+// patient seen any faster, and a full ICU doesn't slow a scheduled front-desk admission down either.
+double OccupancyFractionForChannel(ArrivalChannel channel)
+{
+    var units = ChannelTargetUnits(channel);
+    var capacity = world.Hospital.NursingUnits.Where(u => units.Contains(u.Id)).Sum(u => u.RoomCount * u.BedsPerRoom);
+    var occupied = census.CurrentAdmissions.Count(a => units.Contains(a.NursingUnitId));
+    return capacity == 0 ? 0 : Math.Clamp((double)occupied / capacity, 0, 1);
+}
+
 AdtPatient ToAdtPatient(Person patient) => new(
     patient.Id, patient.FirstName, patient.LastName,
     patient.Sex == Sex.Male ? 'M' : 'F', patient.DateOfBirth, patient.Ssn,
@@ -349,4 +445,10 @@ string NextControlId() => $"HS{DateTime.UtcNow:yyyyMMddHHmmss}{controlIdSeq++:00
 
 string SummarizeAck(string ack) => ack.Length > 60 ? ack[..60].Replace('\r', '|') + "..." : ack.Replace('\r', '|');
 
-record PendingArrival(Person Patient, DateTime DecideAt);
+record PendingArrival(Person Patient, ArrivalChannel Channel, DateTime DecideAt);
+
+// How someone gets in the door matters - it determines who's even eligible to arrive this way, which
+// ward they actually head toward, and what "busy" means for their wait. Not just flavor: ED and the
+// front desk feed general beds, but the children's ward and L&D are the *only* way in for their
+// respective units - nobody gets routed there some other way (no ED-to-L&D, no front-desk-to-PEDS).
+enum ArrivalChannel { ED, ChildrensWard, FrontDesk, LaborAndDelivery }
