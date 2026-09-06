@@ -262,7 +262,10 @@ board, not here):
 - **More ADT event types** — round out the trigger events beyond what's modeled today.
 - **More expressive ADT** — NK1 (next of kin), GT1 (guarantor), ACC (accident info), and similar
   segments this simulator doesn't send yet.
-- **Diagnoses** — DG1 segments carrying real ICD-10 codes, not just a chief-complaint string.
-- **DRG** — diagnosis-related group assignment, the way billing/casemix would actually see a stay.
+- **Diagnoses and procedures** — DG1 (ICD-10 diagnoses) and PR1 (procedures actually performed, as
+  opposed to just what got ordered) riding an ADT^A08 sent once coding's done, not just a
+  chief-complaint string.
+- **DRG** — diagnosis-related group assignment computed from that DG1/PR1 pair, the way billing/casemix
+  would actually see a stay.
 - **Further out** — X12 claims out to a payer and remits (835) coming back, closing the loop past HL7
   entirely.
