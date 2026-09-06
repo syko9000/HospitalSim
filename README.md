@@ -253,18 +253,16 @@ point of feeding this into an interface engine in the first place.
 
 ## Roadmap
 
-Known gaps, not yet built:
+General directions, roughly nearest-to-farthest-out (specific tracked items live in a private project
+board, not here):
 
-- **A11 (cancel admit)** — the one admit/class/status event Clinicals doesn't originate. Inpatient vs.
-  outpatient already moves both directions mid-stay (A06/A07) with a fresh timeline each time; A11 would
-  round that out.
-- **Result content** — ORU^R01 results are a canned string (`Within normal limits` / `Abnormal - see
-  report`, ~15% abnormal), not real reference ranges, units, or numeric values. Enough to look like a
-  result landed, not enough for anything that inspects what it actually says.
-- **Occupancy-aware pacing** — arrival rate, inpatient probability, and length-of-stay ranges are
-  independent knobs that happen to roughly balance out at their defaults, not a feedback loop against
-  actual bed occupancy. Registration already falls back to outpatient rather than blocking when no bed's
-  free, but a truly steady-state-aware arrival rate is still future work.
-- **Billing** — Registration and billing are tightly coupled in real hospitals: an ADT^A08 carrying DG1
-  (diagnosis) segments would flow back into Registration from billing/HIM once that exists, with
-  Registration echoing its own A08 back out. Not started.
+- **Context-aware ordering** — tie what gets ordered to the patient's actual reason for being there and
+  where they currently are, instead of a uniform random pick across the whole catalog.
+- **More order types** — broaden beyond the current lab/rad/path/procedure set.
+- **More ADT event types** — round out the trigger events beyond what's modeled today.
+- **More expressive ADT** — NK1 (next of kin), GT1 (guarantor), ACC (accident info), and similar
+  segments this simulator doesn't send yet.
+- **Diagnoses** — DG1 segments carrying real ICD-10 codes, not just a chief-complaint string.
+- **DRG** — diagnosis-related group assignment, the way billing/casemix would actually see a stay.
+- **Further out** — X12 claims out to a payer and remits (835) coming back, closing the loop past HL7
+  entirely.
