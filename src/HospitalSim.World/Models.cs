@@ -17,9 +17,15 @@ public sealed class InsuranceCompany
     public required string Name { get; init; }
 }
 
+// A doctor is a resident of the town too, not a disconnected identity - PersonId points at their
+// actual Person record (same households/family/lineage as everyone else, and the same Resident/
+// DeathDate tracking, so nothing stops a doctor - or their spouse or kid - from later showing up as a
+// patient). FirstName/LastName are copied from that Person at creation for convenient direct access on
+// HL7 fields that need them, not independently generated.
 public sealed class Doctor
 {
     public required string Id { get; init; }
+    public required string PersonId { get; init; }
     public required string FirstName { get; init; }
     public required string LastName { get; init; }
     public required string Specialty { get; init; }

@@ -32,7 +32,6 @@ public sealed class WorldGenerator(int seed)
             ],
         };
 
-        var doctors = GenerateDoctors(doctorCount);
         var insurers = GenerateInsuranceCompanies(insuranceCompanyCount);
 
         // The population isn't generated as a flat, already-adult snapshot - it's simulated year by
@@ -40,6 +39,11 @@ public sealed class WorldGenerator(int seed)
         // town) so lineage, households, and age structure all come out of that history rather than
         // being assembled directly. See PopulationSimulator for the actual mechanics.
         var (households, people) = new PopulationSimulator(_rng, town, insurers).Simulate(simulationYears, founderHouseholdCount);
+
+        // Doctors are drawn from that same population rather than invented separately - a doctor is a
+        // resident with their own household, spouse, kids, and mortality, same as anyone else, so
+        // nothing stops one of them (or a family member) from later showing up as a patient too.
+        var doctors = GenerateDoctors(doctorCount, people);
 
         return new HospitalWorld
         {
@@ -51,19 +55,27 @@ public sealed class WorldGenerator(int seed)
         };
     }
 
-    private List<Doctor> GenerateDoctors(int count)
+    private List<Doctor> GenerateDoctors(int count, List<Person> people)
     {
-        var doctors = new List<Doctor>(count);
-        var usedSpecialties = new List<string>(Names.Specialties);
-        for (var i = 0; i < count; i++)
+        var today = DateOnly.FromDateTime(DateTime.UtcNow);
+        // Old enough to plausibly be through medical school and residency.
+        var candidates = people
+            .Where(p => p.Resident && p.DeathDate is null && p.DateOfBirth <= today.AddYears(-28))
+            .OrderBy(_ => _rng.Next())
+            .Take(count)
+            .ToList();
+
+        var doctors = new List<Doctor>(candidates.Count);
+        for (var i = 0; i < candidates.Count; i++)
         {
-            var specialty = usedSpecialties[i % usedSpecialties.Count];
+            var person = candidates[i];
             doctors.Add(new Doctor
             {
                 Id = $"D{i + 1:0000}",
-                FirstName = PickFirstName(),
-                LastName = Pick(Names.Surnames),
-                Specialty = specialty,
+                PersonId = person.Id,
+                FirstName = person.FirstName,
+                LastName = person.LastName,
+                Specialty = Names.Specialties[i % Names.Specialties.Length],
             });
         }
         return doctors;
@@ -78,8 +90,6 @@ public sealed class WorldGenerator(int seed)
             Name = $"{root} {Pick(Names.InsuranceSuffixes)}",
         }).ToList();
     }
-
-    private string PickFirstName() => _rng.NextDouble() < 0.5 ? Pick(Names.Male) : Pick(Names.Female);
 
     private T Pick<T>(IReadOnlyList<T> items) => items[_rng.Next(items.Count)];
 
