@@ -229,8 +229,21 @@ async Task ProcessDueDispositionsAsync()
     var due = pending.Where(a => now >= a.DecideAt).ToList();
     foreach (var arrival in due)
     {
-        pending.Remove(arrival);
-        await DecideDispositionAsync(arrival.Patient, arrival.Channel);
+        try
+        {
+            await DecideDispositionAsync(arrival.Patient, arrival.Channel);
+            pending.Remove(arrival);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // Only remove from pending once the disposition actually went through - leaving it queued
+            // on failure means the next check retries the same arrival instead of losing them outright
+            // (this happened live: Synapse briefly unreachable mid-redeploy silently dropped an
+            // arrival that was removed from pending before the broadcast that then failed). One
+            // arrival failing shouldn't block the rest of this batch either, hence catching per-item
+            // rather than around the whole loop.
+            Console.Error.WriteLine($"Disposition failed for {arrival.Patient.FirstName} {arrival.Patient.LastName}: {ex.Message}");
+        }
     }
 }
 
