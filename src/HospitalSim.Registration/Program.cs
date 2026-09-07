@@ -11,16 +11,13 @@ var waitMinMinutes = double.Parse(Environment.GetEnvironmentVariable("HOSPITALSI
 var waitMaxMinutes = double.Parse(Environment.GetEnvironmentVariable("HOSPITALSIM_WAIT_MAX_MINUTES") ?? "60");
 var inpatientProbability = double.Parse(Environment.GetEnvironmentVariable("HOSPITALSIM_INPATIENT_PROBABILITY") ?? "0.3");
 var dispositionCheckSeconds = double.Parse(Environment.GetEnvironmentVariable("HOSPITALSIM_DISPOSITION_CHECK_SECONDS") ?? "20");
-// Relative likelihood of each arrival channel - normalized against each other, not absolute
+// Relative likelihood of each *rolled* arrival channel - normalized against each other, not absolute
 // percentages. ED dominates (most unscheduled admissions really do come through the door), front
-// desk (scheduled procedures/surgery) is a meaningful chunk, the children's ward and L&D are each
-// their own smaller, restricted stream.
+// desk (scheduled procedures/surgery) is a meaningful chunk, the children's ward its own smaller,
+// restricted stream. L&D isn't rolled at all - see EnqueueDueBirths.
 var edWeight = double.Parse(Environment.GetEnvironmentVariable("HOSPITALSIM_CHANNEL_WEIGHT_ED") ?? "60");
 var childrensWardWeight = double.Parse(Environment.GetEnvironmentVariable("HOSPITALSIM_CHANNEL_WEIGHT_CHILDRENS_WARD") ?? "10");
 var frontDeskWeight = double.Parse(Environment.GetEnvironmentVariable("HOSPITALSIM_CHANNEL_WEIGHT_FRONT_DESK") ?? "25");
-var laborAndDeliveryWeight = double.Parse(Environment.GetEnvironmentVariable("HOSPITALSIM_CHANNEL_WEIGHT_LABOR_AND_DELIVERY") ?? "5");
-var childbearingMinAge = int.Parse(Environment.GetEnvironmentVariable("HOSPITALSIM_CHILDBEARING_MIN_AGE") ?? "14");
-var childbearingMaxAge = int.Parse(Environment.GetEnvironmentVariable("HOSPITALSIM_CHILDBEARING_MAX_AGE") ?? "50");
 var sendingApp = Environment.GetEnvironmentVariable("HOSPITALSIM_SENDING_APP") ?? "REGISTRATION";
 var sendingFacility = Environment.GetEnvironmentVariable("HOSPITALSIM_SENDING_FACILITY") ?? "WRMC";
 var listenPort = int.Parse(Environment.GetEnvironmentVariable("HOSPITALSIM_LISTEN_PORT") ?? "6660");
@@ -92,6 +89,7 @@ async Task ArrivalLoopAsync()
         try
         {
             EnqueueArrival();
+            EnqueueDueBirths();
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -128,10 +126,11 @@ double ArrivalRateMultiplier(DateTime now)
     return hourly[now.Hour] * weekendBump;
 }
 
+// LaborAndDelivery deliberately isn't handled here - it's never picked through this generic
+// roll-a-channel-then-find-a-candidate path, see EnqueueDueBirths.
 bool ChannelEligible(ArrivalChannel channel, Person patient) => channel switch
 {
     ArrivalChannel.ChildrensWard => Age(patient) < 18,
-    ArrivalChannel.LaborAndDelivery => patient.Sex == Sex.Female && Age(patient) >= childbearingMinAge && Age(patient) <= childbearingMaxAge,
     _ => true, // ED and the front desk take anyone
 };
 
@@ -149,6 +148,8 @@ string[] ChannelTargetUnits(ArrivalChannel channel) => channel switch
 // (most ED visits go home; front-desk same-day procedures vs. an inpatient surgical stay are both real).
 bool ChannelAlwaysInpatient(ArrivalChannel channel) => channel is ArrivalChannel.ChildrensWard or ArrivalChannel.LaborAndDelivery;
 
+// Only the channels someone shows up to unscheduled - L&D arrivals are driven by actual due dates
+// (EnqueueDueBirths), never by this weighted roll.
 ArrivalChannel PickChannel()
 {
     var weights = new (ArrivalChannel channel, double weight)[]
@@ -156,7 +157,6 @@ ArrivalChannel PickChannel()
         (ArrivalChannel.ED, edWeight),
         (ArrivalChannel.ChildrensWard, childrensWardWeight),
         (ArrivalChannel.FrontDesk, frontDeskWeight),
-        (ArrivalChannel.LaborAndDelivery, laborAndDeliveryWeight),
     };
     var roll = rng.NextDouble() * weights.Sum(w => w.weight);
     var cumulative = 0.0;
@@ -181,7 +181,37 @@ void EnqueueArrival()
         .ToList();
     if (candidates.Count == 0) return; // nobody eligible for this channel right now - skip, the next roll tries again
 
-    var patient = candidates[rng.Next(candidates.Count)];
+    ScheduleArrival(candidates[rng.Next(candidates.Count)], channel);
+}
+
+// L&D isn't a random roll against an age/sex filter - the population simulator already knows exactly
+// who's due today (a not-yet-born child's DateOfBirth), so this looks up today's births directly and
+// sends their mother in, instead of picking an arbitrary childbearing-age woman with no connection to
+// an actual pregnancy.
+void EnqueueDueBirths()
+{
+    var today = DateOnly.FromDateTime(DateTime.UtcNow);
+    foreach (var child in world.People.Where(p => p.DateOfBirth == today))
+    {
+        // Prefer a living resident female parent (the one who was actually pregnant); fall back to
+        // whichever parent is still around otherwise - same-sex parents are a case this simulator's
+        // birth mechanic already doesn't model precisely, this just keeps it from throwing rather than
+        // pretending to solve it.
+        var mother = child.ParentIds
+            .Select(id => world.People.FirstOrDefault(p => p.Id == id))
+            .Where(p => p is { Resident: true, DeathDate: null })
+            .OrderByDescending(p => p!.Sex == Sex.Female)
+            .FirstOrDefault();
+        if (mother is null) continue; // both parents dead or emigrated by the due date - nobody to send in
+
+        if (census.IsAdmitted(mother.Id) || pending.Any(a => a.Patient.Id == mother.Id)) continue; // already on her way in for this birth
+
+        ScheduleArrival(mother, ArrivalChannel.LaborAndDelivery);
+    }
+}
+
+void ScheduleArrival(Person patient, ArrivalChannel channel)
+{
     // A fuller hospital means a longer wait to be seen - but "fuller" has to mean the capacity that
     // would actually see this patient: PEDS occupancy for a children's-ward arrival, ED occupancy for
     // an ED arrival, and so on - not whole-hospital occupancy, which doesn't reflect who's actually
@@ -363,10 +393,16 @@ async Task<string> HandleInboundAsync(string rawMessage)
     }
     else if (parsed.MessageType == "ADT^A06") // outpatient being changed to inpatient
     {
-        if (admission.Class != PatientClass.Outpatient)
+        if (admission.Class == PatientClass.Inpatient)
         {
-            Console.WriteLine($"[INBOUND]   A06 for {patient.FirstName} {patient.LastName} who isn't currently outpatient");
-            return AckBuilder.Build(sendingApp, sendingFacility, inboundApp, inboundFacility, parsed.MessageControlId, now, accept: false, "Patient is not currently outpatient");
+            // Already in the state being asked for - not an error, and rejecting it as one only
+            // teaches Clinicals nothing. Most likely Clinicals' own picture is what's stale (it missed
+            // whatever earlier broadcast actually made this true), so re-assert the current state the
+            // same way a rejected A02 already does, instead of just NAK'ing and leaving it to retry
+            // forever against a request that's already satisfied.
+            Console.WriteLine($"[INBOUND]   A06 for {patient.FirstName} {patient.LastName} who's already inpatient - no-op, re-asserting current state");
+            await BroadcastAsync(AdtEventType.A06_ChangeToInpatient, admission);
+            return AckBuilder.Build(sendingApp, sendingFacility, inboundApp, inboundFacility, parsed.MessageControlId, now, accept: true);
         }
 
         // The bed itself is registration's call, not clinical's - unlike an A02's specific target,
@@ -387,10 +423,13 @@ async Task<string> HandleInboundAsync(string rawMessage)
     }
     else // ADT^A07 - inpatient being changed to outpatient, freeing their bed
     {
-        if (admission.Class != PatientClass.Inpatient)
+        if (admission.Class == PatientClass.Outpatient)
         {
-            Console.WriteLine($"[INBOUND]   A07 for {patient.FirstName} {patient.LastName} who isn't currently inpatient");
-            return AckBuilder.Build(sendingApp, sendingFacility, inboundApp, inboundFacility, parsed.MessageControlId, now, accept: false, "Patient is not currently inpatient");
+            // Mirror of the A06 case above - already outpatient is the request already satisfied, not
+            // an error. Re-assert current state so Clinicals' (evidently stale) picture self-corrects.
+            Console.WriteLine($"[INBOUND]   A07 for {patient.FirstName} {patient.LastName} who's already outpatient - no-op, re-asserting current state");
+            await BroadcastAsync(AdtEventType.A07_ChangeToOutpatient, admission);
+            return AckBuilder.Build(sendingApp, sendingFacility, inboundApp, inboundFacility, parsed.MessageControlId, now, accept: true);
         }
 
         var freedBed = admission.NursingUnitId;

@@ -33,17 +33,19 @@ concurrently:
 
 - an arrival loop, on an interval shaped by hour-of-day and day-of-week (`ArrivalRateMultiplier` -
   quiet overnight, busiest evening, a modest Friday/Saturday bump), rolls a random `ArrivalChannel`
-  (`ED` / `ChildrensWard` / `FrontDesk` / `LaborAndDelivery`, relative likelihood set by
-  `HOSPITALSIM_CHANNEL_WEIGHT_*`) and queues an eligible not-yet-in-system person for it as a
-  `PendingArrival`, with a real wait span before anyone decides what happens to them - not persisted,
-  since a restart mid-wait losing one pending arrival is a fine simplification for a demo tool. The
-  channel is what someone actually is, not flavor text: `ChildrensWard` only takes under-18s and heads
-  straight for PEDS, `LaborAndDelivery` only takes female patients in the configured childbearing age
-  range (`HOSPITALSIM_CHILDBEARING_MIN_AGE`/`_MAX_AGE`) and only heads for L&D - there's no other way
-  into either of those two units - `FrontDesk` (scheduled procedures/surgery) heads for MS3/MS4, and
-  `ED` is `ED`. The wait scales with how full *that channel's own target unit(s)* currently are, never
-  whole-hospital occupancy - an empty ICU doesn't get an ED patient seen faster, and a full one doesn't
-  slow down a scheduled front-desk admission;
+  (`ED` / `ChildrensWard` / `FrontDesk`, relative likelihood set by `HOSPITALSIM_CHANNEL_WEIGHT_*`) and
+  queues an eligible not-yet-in-system person for it as a `PendingArrival`, with a real wait span before
+  anyone decides what happens to them - not persisted, since a restart mid-wait losing one pending
+  arrival is a fine simplification for a demo tool. The channel is what someone actually is, not flavor
+  text: `ChildrensWard` only takes under-18s and heads straight for PEDS, `FrontDesk` (scheduled
+  procedures/surgery) heads for MS3/MS4, and `ED` is `ED`. A separate `EnqueueDueBirths` check runs
+  alongside that roll rather than being part of it: `LaborAndDelivery` isn't a random channel at all -
+  the population simulator already knows exactly who's due today (a not-yet-born person's own
+  `DateOfBirth`), so this looks up today's actual scheduled births and sends *that* mother in, instead
+  of rolling against an arbitrary childbearing-age-woman filter with no connection to a real pregnancy.
+  The wait scales with how full *that channel's own target unit(s)* currently are, never whole-hospital
+  occupancy - an empty ICU doesn't get an ED patient seen faster, and a full one doesn't slow down a
+  scheduled front-desk admission;
 - a disposition loop checks that queue for anyone whose wait is up and rolls their disposition within
   the channel's own target unit(s) only (`ChildrensWard`/`LaborAndDelivery` are always inpatient -
   nobody walks in there just to go home; `ED`/`FrontDesk` still roll the normal
@@ -211,8 +213,7 @@ Registration's environment variables (all optional):
 | `HOSPITALSIM_WAIT_MIN_MINUTES` / `HOSPITALSIM_WAIT_MAX_MINUTES` | `5` / `60` | how long an arrival waits before disposition is decided |
 | `HOSPITALSIM_INPATIENT_PROBABILITY` | `0.3` | chance an ED/FrontDesk disposition is decided inpatient rather than outpatient (falls back to outpatient anyway if nothing in that channel's unit(s) is free) |
 | `HOSPITALSIM_DISPOSITION_CHECK_SECONDS` | `20` | how often the pending-arrivals queue is checked for anyone whose wait is up |
-| `HOSPITALSIM_CHANNEL_WEIGHT_ED` / `_CHILDRENS_WARD` / `_FRONT_DESK` / `_LABOR_AND_DELIVERY` | `60` / `10` / `25` / `5` | relative likelihood of each arrival channel (normalized against each other, not absolute percentages) |
-| `HOSPITALSIM_CHILDBEARING_MIN_AGE` / `_MAX_AGE` | `14` / `50` | age range eligible for the `LaborAndDelivery` arrival channel |
+| `HOSPITALSIM_CHANNEL_WEIGHT_ED` / `_CHILDRENS_WARD` / `_FRONT_DESK` | `60` / `10` / `25` | relative likelihood of each *rolled* arrival channel (normalized against each other, not absolute percentages) - `LaborAndDelivery` isn't rolled, see above |
 | `HOSPITALSIM_SENDING_APP` / `HOSPITALSIM_SENDING_FACILITY` | `REGISTRATION` / `WRMC` | MSH-3/MSH-4, and Registration's own identity on ACKs it sends |
 
 The 300s/5-60min defaults are a starting guess for a long-running instance, not a tuned steady state -
