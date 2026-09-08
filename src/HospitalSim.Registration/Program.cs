@@ -349,6 +349,19 @@ async Task<string> HandleInboundAsync(string rawMessage)
     var admission = census.Get(patientId);
     if (admission is null)
     {
+        // A discharge that already happened - most likely a duplicate stuck in a downstream retry/
+        // backlog - is a no-op, not an error: the patient's already in the state this message is
+        // asking for. Silently ACKing it (and not re-broadcasting - that already went out once, for
+        // the original) lets a stuck sender's backlog drain on its own instead of piling up NAKs that
+        // someone then has to clear out by hand. A visit number this census has never heard of at all
+        // still gets rejected below, same as before.
+        var visitNumber = parsed.Field("PV1", 19);
+        if (parsed.MessageType == "ADT^A03" && !string.IsNullOrEmpty(visitNumber) && census.WasDischarged(visitNumber))
+        {
+            Console.WriteLine($"[INBOUND]   A03 for visit {visitNumber} - already discharged, ignoring duplicate");
+            return AckBuilder.Build(sendingApp, sendingFacility, inboundApp, inboundFacility, parsed.MessageControlId, now, accept: true);
+        }
+
         Console.WriteLine($"[INBOUND]   {parsed.MessageType} for patient {patientId} who isn't currently admitted/registered");
         return AckBuilder.Build(sendingApp, sendingFacility, inboundApp, inboundFacility, parsed.MessageControlId, now, accept: false, "Patient not currently admitted");
     }

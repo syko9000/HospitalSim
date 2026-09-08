@@ -21,12 +21,18 @@ public sealed record Admission(
 /// Tracks who's currently admitted and which beds are occupied, so the simulator never double-books a
 /// bed or transfers/discharges a patient who was never admitted.
 /// </summary>
-public sealed record CensusSnapshot(List<Admission> Admissions, int NextVisitSeq);
+// DischargedVisitNumbers defaults to [] so a census.json saved before this existed still deserializes.
+public sealed record CensusSnapshot(List<Admission> Admissions, int NextVisitSeq, List<string>? DischargedVisitNumbers = null);
 
 public sealed class Census(Hospital hospital)
 {
     private readonly Dictionary<string, Admission> _byPatient = [];
     private readonly HashSet<string> _occupiedBeds = [];
+    // Every visit number this census has ever discharged - not just the current admissions. A
+    // clinical-initiated A03 that arrives again for one of these (a duplicate stuck in a downstream
+    // retry/backlog, say) is recognized as already-handled instead of being rejected as if the patient
+    // had never been admitted at all.
+    private readonly HashSet<string> _dischargedVisitNumbers = [];
     private int _visitSeq = 1;
 
     public static Census Restore(Hospital hospital, CensusSnapshot snapshot)
@@ -37,10 +43,14 @@ public sealed class Census(Hospital hospital)
             census._byPatient[admission.PatientId] = admission;
             if (!string.IsNullOrEmpty(admission.BedId)) census._occupiedBeds.Add(admission.BedId);
         }
+        foreach (var visitNumber in snapshot.DischargedVisitNumbers ?? [])
+        {
+            census._dischargedVisitNumbers.Add(visitNumber);
+        }
         return census;
     }
 
-    public CensusSnapshot CreateSnapshot() => new(CurrentAdmissions.ToList(), _visitSeq);
+    public CensusSnapshot CreateSnapshot() => new(CurrentAdmissions.ToList(), _visitSeq, [.. _dischargedVisitNumbers]);
 
     public IReadOnlyCollection<Admission> CurrentAdmissions => _byPatient.Values;
 
@@ -94,9 +104,12 @@ public sealed class Census(Hospital hospital)
 
     public void Discharge(string patientId)
     {
-        if (_byPatient.Remove(patientId, out var admission) && !string.IsNullOrEmpty(admission.BedId))
+        if (_byPatient.Remove(patientId, out var admission))
         {
-            _occupiedBeds.Remove(admission.BedId);
+            if (!string.IsNullOrEmpty(admission.BedId)) _occupiedBeds.Remove(admission.BedId);
+            _dischargedVisitNumbers.Add(admission.VisitNumber);
         }
     }
+
+    public bool WasDischarged(string visitNumber) => _dischargedVisitNumbers.Contains(visitNumber);
 }
