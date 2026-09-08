@@ -372,8 +372,15 @@ async Task<string> HandleInboundAsync(string rawMessage)
     {
         if (admission.Class != PatientClass.Inpatient)
         {
-            Console.WriteLine($"[INBOUND]   A02 for {patient.FirstName} {patient.LastName} who's currently outpatient - no bed to move");
-            return AckBuilder.Build(sendingApp, sendingFacility, inboundApp, inboundFacility, parsed.MessageControlId, now, accept: false, "Not applicable to an outpatient visit");
+            // Same "already-satisfied request, not an error" treatment the A06/A07 no-op cases below
+            // already get - a transfer proposed while this visit was still inpatient is just stale once
+            // they've since gone outpatient (a class change Clinicals evidently already knows about, or
+            // it wouldn't have proposed a bed at all), most likely a duplicate stuck in a downstream
+            // retry/backlog. Nothing to reassert here the way a bad bed guess gets corrected below -
+            // there's no bed to describe for an outpatient - so this is a silent ACK, not a NAK someone
+            // has to notice and clear by hand.
+            Console.WriteLine($"[INBOUND]   A02 for {patient.FirstName} {patient.LastName} who's currently outpatient - stale, ignoring");
+            return AckBuilder.Build(sendingApp, sendingFacility, inboundApp, inboundFacility, parsed.MessageControlId, now, accept: true);
         }
 
         var unitId = parsed.Component("PV1", 3, 1);
