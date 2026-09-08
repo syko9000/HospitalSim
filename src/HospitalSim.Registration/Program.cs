@@ -349,23 +349,17 @@ async Task<string> HandleInboundAsync(string rawMessage)
     var admission = census.Get(patientId);
     if (admission is null)
     {
-        // A visit that's already been discharged is done, full stop - a transfer, another discharge,
-        // or a class change that shows up for it after the fact is stale, not an error, most likely a
-        // duplicate stuck in a downstream retry/backlog from before the discharge itself landed (e.g.
-        // an escalation rolled while the visit was still outpatient, queued around the same time as the
-        // discharge that then beat it there). Silently ACKing it (and not re-broadcasting - whatever
-        // was true about this visit already went out when it actually happened) lets a stuck sender's
-        // backlog drain on its own instead of piling up NAKs someone has to notice and clear by hand. A
-        // visit number this census has never heard discharged at all still gets rejected below.
-        var visitNumber = parsed.Field("PV1", 19);
-        if (!string.IsNullOrEmpty(visitNumber) && census.WasDischarged(visitNumber))
-        {
-            Console.WriteLine($"[INBOUND]   {parsed.MessageType} for visit {visitNumber} - already discharged, ignoring stale request");
-            return AckBuilder.Build(sendingApp, sendingFacility, inboundApp, inboundFacility, parsed.MessageControlId, now, accept: true);
-        }
-
-        Console.WriteLine($"[INBOUND]   {parsed.MessageType} for patient {patientId} who isn't currently admitted/registered");
-        return AckBuilder.Build(sendingApp, sendingFacility, inboundApp, inboundFacility, parsed.MessageControlId, now, accept: false, "Patient not currently admitted");
+        // Every one of these four types is Clinicals reacting to a visit it learned about from this
+        // census's own broadcast in the first place - by the time one shows up for a patient this
+        // census doesn't currently have admitted, the visit is simply over (discharged, possibly
+        // multiple lifecycle events ago) and this is a stale straggler, most likely a duplicate stuck
+        // in a downstream retry/backlog. Whether it's a transfer, another discharge, or a class change
+        // makes no difference, and rejecting it teaches the sender nothing it can act on - unlike the
+        // A02 bed-conflict/A06/A07 no-op cases above, there's no current state left to reassert.
+        // Nothing here ever touches census either way, so ACKing it is exactly as safe as NAKing it,
+        // just without leaving something for someone to have to notice and clear out by hand.
+        Console.WriteLine($"[INBOUND]   {parsed.MessageType} for patient {patientId} who isn't currently admitted/registered - stale, ignoring");
+        return AckBuilder.Build(sendingApp, sendingFacility, inboundApp, inboundFacility, parsed.MessageControlId, now, accept: true);
     }
 
     var patient = world.People.First(p => p.Id == patientId);
