@@ -8,6 +8,10 @@ namespace HospitalSim.Clinicals;
 // broadcast already carries) - everything else stays unknown by design, but step-down routing (ER/ICU
 // to PEDS vs. MS, see Program.cs) is genuinely age-dependent, so this one has a real behavioral use,
 // not just completeness. Nullable since a message missing PID-7 shouldn't be a hard failure.
+// LastDischargeAttemptAt tracks the last time a discharge was actually sent for this visit, separate
+// from PlannedDischargeAt (when it became due) - without it, DischargeDueVisitsAsync would resend an
+// unconfirmed discharge on every single lifecycle tick forever, since nothing else ever moves a due
+// visit's plan forward. Null means never attempted.
 public sealed record Visit(
     string VisitNumber,
     string PatientId,
@@ -18,7 +22,8 @@ public sealed record Visit(
     string CurrentUnit,
     DateOnly? DateOfBirth,
     DateTime AdmitDateTime,
-    DateTime PlannedDischargeAt);
+    DateTime PlannedDischargeAt,
+    DateTime? LastDischargeAttemptAt = null);
 
 /// <summary>
 /// Tracks who Clinicals currently believes is in the hospital, keyed by visit number rather than

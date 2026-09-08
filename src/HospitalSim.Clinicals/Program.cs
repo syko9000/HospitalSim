@@ -21,6 +21,11 @@ var pathPort = int.Parse(Environment.GetEnvironmentVariable("CLINICALS_PATH_MLLP
 var adtHost = Environment.GetEnvironmentVariable("CLINICALS_ADT_MLLP_HOST") ?? "localhost";
 var adtPort = int.Parse(Environment.GetEnvironmentVariable("CLINICALS_ADT_MLLP_PORT") ?? "6660");
 var adtIntervalSeconds = double.Parse(Environment.GetEnvironmentVariable("CLINICALS_ADT_INTERVAL_SECONDS") ?? "30");
+// A due discharge that hasn't been echoed back yet is retried, not abandoned - but not on every single
+// lifecycle tick either. Without a cooldown, a slow or stuck downstream (an interface engine backlog,
+// say) turns into an unbounded flood: the same still-unconfirmed visit resent every ~30s forever, with
+// more visits joining that pile as their own discharge comes due, never shrinking.
+var dischargeResendCooldownMinutes = double.Parse(Environment.GetEnvironmentVariable("CLINICALS_DISCHARGE_RESEND_COOLDOWN_MINUTES") ?? "5");
 var outpatientLosMinHours = double.Parse(Environment.GetEnvironmentVariable("CLINICALS_OUTPATIENT_LOS_MIN_HOURS") ?? "1");
 var outpatientLosMaxHours = double.Parse(Environment.GetEnvironmentVariable("CLINICALS_OUTPATIENT_LOS_MAX_HOURS") ?? "6");
 var inpatientLosMinHours = double.Parse(Environment.GetEnvironmentVariable("CLINICALS_INPATIENT_LOS_MIN_HOURS") ?? "24");
@@ -121,7 +126,10 @@ async Task LifecycleLoopAsync()
 async Task DischargeDueVisitsAsync()
 {
     var now = DateTime.UtcNow;
-    var due = state.Snapshot().Where(v => now >= v.PlannedDischargeAt).ToList();
+    var cooldown = TimeSpan.FromMinutes(dischargeResendCooldownMinutes);
+    var due = state.Snapshot()
+        .Where(v => now >= v.PlannedDischargeAt && (v.LastDischargeAttemptAt is not { } last || now - last >= cooldown))
+        .ToList();
     foreach (var visit in due)
     {
         var message = AdtMessageBuilder.Build(
@@ -133,6 +141,11 @@ async Task DischargeDueVisitsAsync()
             insurance: null,
             app, facility, "REGISTRATION", facility,
             NextControlId(), now);
+
+        // Recorded before the send completes, not after - a visit that's still in flight (or whose ack
+        // never comes because the connection itself is stuck) must not be retried next tick either.
+        state.RecordIn(visit with { LastDischargeAttemptAt = now });
+        VisitStateStore.Save(state, statePath);
 
         var ack = await adtMllp.SendAsync(message, cts.Token);
         var tag = WasAccepted(ack) ? "DISCHARGE" : "DISCHARGE-REJECTED";
