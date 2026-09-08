@@ -349,16 +349,18 @@ async Task<string> HandleInboundAsync(string rawMessage)
     var admission = census.Get(patientId);
     if (admission is null)
     {
-        // A discharge that already happened - most likely a duplicate stuck in a downstream retry/
-        // backlog - is a no-op, not an error: the patient's already in the state this message is
-        // asking for. Silently ACKing it (and not re-broadcasting - that already went out once, for
-        // the original) lets a stuck sender's backlog drain on its own instead of piling up NAKs that
-        // someone then has to clear out by hand. A visit number this census has never heard of at all
-        // still gets rejected below, same as before.
+        // A visit that's already been discharged is done, full stop - a transfer, another discharge,
+        // or a class change that shows up for it after the fact is stale, not an error, most likely a
+        // duplicate stuck in a downstream retry/backlog from before the discharge itself landed (e.g.
+        // an escalation rolled while the visit was still outpatient, queued around the same time as the
+        // discharge that then beat it there). Silently ACKing it (and not re-broadcasting - whatever
+        // was true about this visit already went out when it actually happened) lets a stuck sender's
+        // backlog drain on its own instead of piling up NAKs someone has to notice and clear by hand. A
+        // visit number this census has never heard discharged at all still gets rejected below.
         var visitNumber = parsed.Field("PV1", 19);
-        if (parsed.MessageType == "ADT^A03" && !string.IsNullOrEmpty(visitNumber) && census.WasDischarged(visitNumber))
+        if (!string.IsNullOrEmpty(visitNumber) && census.WasDischarged(visitNumber))
         {
-            Console.WriteLine($"[INBOUND]   A03 for visit {visitNumber} - already discharged, ignoring duplicate");
+            Console.WriteLine($"[INBOUND]   {parsed.MessageType} for visit {visitNumber} - already discharged, ignoring stale request");
             return AckBuilder.Build(sendingApp, sendingFacility, inboundApp, inboundFacility, parsed.MessageControlId, now, accept: true);
         }
 
